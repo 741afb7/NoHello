@@ -21,6 +21,7 @@
 #include <ranges>
 #include <vector>
 #include <utility> // For std::pair, std::move
+#include <sys/types.h>
 
 #include "zygisk.hpp"
 #include "external/android_filesystem_config.h"
@@ -93,6 +94,44 @@ static bool anomaly(MountRootResolver mrs, const MountInfo &mount) {
 		}
 	}
 	return false;
+}
+
+//hook mountinfo
+static int (*orig_open)(const char *pathname, int flags, mode_t mode) = nullptr;
+static FILE *(*orig_fopen)(const char *pathname, const char *mode) = nullptr;
+static ssize_t (*orig_read)(int fd, void *buf, size_t count) = nullptr;
+
+static const char *fake_mountinfo_path = "/data/adb/nohello/fake_mountinfo";
+static const char *fake_mountinfo_content = "24 20 0:22 / / rw,relatime - ext4 /dev/block/dm-0 rw\n";
+
+static int my_open(const char *pathname, int flags, mode_t mode) {
+    if (strcmp(pathname, "/proc/self/mountinfo") == 0) {
+        return orig_open(fake_mountinfo_path, flags, mode);
+    }
+    return orig_open(pathname, flags, mode);
+}
+
+static FILE *my_fopen(const char *pathname, const char *mode) {
+    if (strcmp(pathname, "/proc/self/mountinfo") == 0) {
+        return fopen(fake_mountinfo_path, mode);
+    }
+    return orig_fopen(pathname, mode);
+}
+
+static ssize_t my_read(int fd, void *buf, size_t count) {
+    char path[128], resolved[128];
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    ssize_t len = readlink(path, resolved, sizeof(resolved) - 1);
+    if (len > 0) {
+        resolved[len] = '\0';
+        if (strcmp(resolved, "/proc/self/mountinfo") == 0) {
+            size_t fake_len = strlen(fake_mountinfo_content);
+            if (count < fake_len) fake_len = count;
+            memcpy(buf, fake_mountinfo_content, fake_len);
+            return fake_len;
+        }
+    }
+    return orig_read(fd, buf, count);
 }
 
 static bool anomaly(const MountRuleParser::MountRule& rule, MountRootResolver mrs, const MountInfo &mount) {
@@ -378,6 +417,9 @@ private:
 				return;
 			}
 			api->pltHookRegister(rundev, runinode, "unshare", (void*) reshare, (void**) &ar_unshare);
+			api->pltHookRegister(cdev, cinode, "open", (void*) my_open, (void**) &orig_open);
+			api->pltHookRegister(cdev, cinode, "fopen", (void*) my_fopen, (void**) &orig_fopen);
+			api->pltHookRegister(cdev, cinode, "read", (void*) my_read, (void**) &orig_read);
 			api->pltHookCommit();
 			if (!nodirtyro) {
 				if (auto res = robaseby(rundev, runinode)) {
