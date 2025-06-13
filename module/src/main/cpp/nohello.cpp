@@ -22,6 +22,7 @@
 #include <vector>
 #include <utility> // For std::pair, std::move
 #include <sys/types.h>
+#include <memory>
 
 #include "zygisk.hpp"
 #include "external/android_filesystem_config.h"
@@ -119,12 +120,14 @@ static FILE *my_fopen(const char *pathname, const char *mode) {
 }
 
 static ssize_t my_read(int fd, void *buf, size_t count) {
-    char path[128], resolved[128];
-    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
-    ssize_t len = readlink(path, resolved, sizeof(resolved) - 1);
+    // Dynamically allocated buffers
+    auto path = std::make_unique<char[]>(PATH_MAX);
+    auto resolved = std::make_unique<char[]>(PATH_MAX);
+    snprintf(path.get(), PATH_MAX, "/proc/self/fd/%d", fd);
+    ssize_t len = readlink(path.get(), resolved.get(), PATH_MAX - 1);
     if (len > 0) {
         resolved[len] = '\0';
-        if (strcmp(resolved, "/proc/self/mountinfo") == 0) {
+        if (strcmp(resolved.get(), "/proc/self/mountinfo") == 0) {
             size_t fake_len = strlen(fake_mountinfo_content);
             if (count < fake_len) fake_len = count;
             memcpy(buf, fake_mountinfo_content, fake_len);
