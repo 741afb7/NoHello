@@ -114,25 +114,26 @@ static int my_open(const char *pathname, int flags, mode_t mode) {
 
 static FILE *my_fopen(const char *pathname, const char *mode) {
     if (strcmp(pathname, "/proc/self/mountinfo") == 0) {
-        return fopen(fake_mountinfo_path, mode);
+        return orig_fopen(fake_mountinfo_path, mode);
     }
     return orig_fopen(pathname, mode);
 }
 
 static ssize_t my_read(int fd, void *buf, size_t count) {
-    // Dynamically allocated buffers
+    if (!orig_read) return -1;
+
     auto path = std::make_unique<char[]>(PATH_MAX);
     auto resolved = std::make_unique<char[]>(PATH_MAX);
     snprintf(path.get(), PATH_MAX, "/proc/self/fd/%d", fd);
     ssize_t len = readlink(path.get(), resolved.get(), PATH_MAX - 1);
-    if (len > 0) {
-        resolved[len] = '\0';
-        if (strcmp(resolved.get(), "/proc/self/mountinfo") == 0) {
-            size_t fake_len = strlen(fake_mountinfo_content);
-            if (count < fake_len) fake_len = count;
-            memcpy(buf, fake_mountinfo_content, fake_len);
-            return fake_len;
-        }
+    if (len <= 0) return orig_read(fd, buf, count); 
+    resolved[len] = '\0';
+
+    if (strcmp(resolved.get(), "/proc/self/mountinfo") == 0) {
+        size_t fake_len = strlen(fake_mountinfo_content);
+        if (count < fake_len) fake_len = count;
+        memcpy(buf, fake_mountinfo_content, fake_len);
+        return fake_len;
     }
     return orig_read(fd, buf, count);
 }
