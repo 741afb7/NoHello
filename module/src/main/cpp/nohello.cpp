@@ -23,6 +23,9 @@
 #include <utility> // For std::pair, std::move
 #include <sys/types.h>
 #include <memory>
+#include <sys/syscall.h>
+#include <sys/mman.h>
+#include <errno.h>
 
 #include "zygisk.hpp"
 #include "external/android_filesystem_config.h"
@@ -97,6 +100,18 @@ static bool anomaly(MountRootResolver mrs, const MountInfo &mount) {
 	return false;
 }
 
+static int create_fake_mountinfo_fd() {
+    int fd = syscall(__NR_memfd_create, "fake_mountinfo", 0);
+    if (fd < 0) {
+        LOGE("memfd_create failed: %s", strerror(errno));
+        return -1;
+    }
+    const char *content = "24 20 0:22 / / rw,relatime - ext4 /dev/block/dm-0 rw\n";
+    write(fd, content, strlen(content));
+    lseek(fd, 0, SEEK_SET); 
+    return fd;
+}
+
 //hook mountinfo
 static int (*orig_open)(const char *pathname, int flags, mode_t mode) = nullptr;
 static FILE *(*orig_fopen)(const char *pathname, const char *mode) = nullptr;
@@ -104,20 +119,39 @@ static ssize_t (*orig_read)(int fd, void *buf, size_t count) = nullptr;
 
 static const char *fake_mountinfo_path = "/data/adb/nohello/fake_mountinfo";
 static const char *fake_mountinfo_content = "24 20 0:22 / / rw,relatime - ext4 /dev/block/dm-0 rw\n";
+static int (*orig_open)(const char *pathname, int flags, mode_t mode) = nullptr;
 
 static int my_open(const char *pathname, int flags, mode_t mode) {
     if (strcmp(pathname, "/proc/self/mountinfo") == 0) {
-        return orig_open(fake_mountinfo_path, flags, mode);
+        int fd = create_fake_mountinfo_fd();
+        if (fd >= 0) {
+            LOGD("hooked open -> fake mountinfo via memfd");
+            return fd;
+        } else {
+            LOGE("fallback: open real mountinfo");
+        }
     }
     return orig_open(pathname, flags, mode);
 }
 
+static FILE *(*orig_fopen)(const char *pathname, const char *mode) = nullptr;
 static FILE *my_fopen(const char *pathname, const char *mode) {
     if (strcmp(pathname, "/proc/self/mountinfo") == 0) {
-        return orig_fopen(fake_mountinfo_path, mode);
+        int fd = create_fake_mountinfo_fd();
+        if (fd >= 0) {
+            FILE *f = fdopen(fd, mode);
+            if (f) {
+                LOGD("hooked fopen -> fake mountinfo via memfd");
+                return f;
+            } else {
+                close(fd);
+            }
+        }
+        LOGE("fallback: fopen real mountinfo");
     }
     return orig_fopen(pathname, mode);
 }
+
 
 static ssize_t my_read(int fd, void *buf, size_t count) {
     if (!orig_read) return -1;
@@ -423,7 +457,6 @@ private:
 			api->pltHookRegister(rundev, runinode, "unshare", (void*) reshare, (void**) &ar_unshare);
 			api->pltHookRegister(cdev, cinode, "open", (void*) my_open, (void**) &orig_open);
 			api->pltHookRegister(cdev, cinode, "fopen", (void*) my_fopen, (void**) &orig_fopen);
-			api->pltHookRegister(cdev, cinode, "read", (void*) my_read, (void**) &orig_read);
 			api->pltHookCommit();
 			if (!nodirtyro) {
 				if (auto res = robaseby(rundev, runinode)) {
