@@ -291,11 +291,13 @@ static int reshare(int flags) {
     return ar_unshare(flags & ~(CLONE_NEWNS | CLONE_NEWCGROUP));
 }
 
+extern void init_mountinfo_hook();
 class NoHello : public zygisk::ModuleBase {
 public:
     void onLoad(Api *_api, JNIEnv *_env) override {
         this->api = _api;
         this->env = _env;
+	init_mountinfo_hook();
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
