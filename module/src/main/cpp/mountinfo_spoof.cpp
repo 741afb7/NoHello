@@ -8,6 +8,7 @@
 #include <cstring>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <android/log.h>
 
 #include "log.h"
 #include "zygisk.hpp"
