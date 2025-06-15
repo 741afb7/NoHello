@@ -12,6 +12,7 @@
 
 #include "log.h"
 #include "zygisk.hpp"
+using zygisk::Api;
 
 static ssize_t (*orig_read)(int fd, void *buf, size_t count) = nullptr;
 static int (*orig_open)(const char *pathname, int flags, ...) = nullptr;
@@ -65,38 +66,57 @@ std::string remap_mountinfo(const std::string &orig) {
 }
 
 ssize_t my_hooked_read(int fd, void *buf, size_t count) {
-    std::lock_guard<std::mutex> lock(cache_mutex);
-    auto it = mountinfo_cache.find(fd);
-    if (it != mountinfo_cache.end()) {
-        std::string &data = it->second;
-        if (data.empty()) return 0;
-        size_t len = std::min(count, data.size());
-        memcpy(buf, data.data(), len);
-        data.erase(0, len);
-        return len;
+    static thread_local bool in_hook = false;
+    if (in_hook || !orig_read) return orig_read ? orig_read(fd, buf, count) : -1;
+    in_hook = true;
+
+    ssize_t result = 0;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto it = mountinfo_cache.find(fd);
+        if (it != mountinfo_cache.end()) {
+            std::string &data = it->second;
+            if (data.empty()) {
+                result = 0;
+            } else {
+                size_t len = std::min(count, data.size());
+                memcpy(buf, data.data(), len);
+                data.erase(0, len);
+                result = static_cast<ssize_t>(len);
+            }
+            in_hook = false;
+            return result;
+        }
     }
-    return orig_read ? orig_read(fd, buf, count) : -1;
+
+    result = orig_read(fd, buf, count);
+    in_hook = false;
+    return result;
 }
 
 int my_hooked_open(const char *pathname, int flags, ...) {
-    if (is_mountinfo_path(pathname)) {
-        int fd = orig_open ? orig_open(pathname, flags) : -1;
-        if (fd >= 0) {
-            char buffer[65536] = {0};
-            ssize_t len = pread(fd, buffer, sizeof(buffer) - 1, 0);
-            if (len > 0) {
-                std::string orig(buffer, len);
-                std::string spoofed = remap_mountinfo(orig);
-                std::lock_guard<std::mutex> lock(cache_mutex);
-                mountinfo_cache[fd] = spoofed;
-            }
+    static thread_local bool in_hook = false;
+    if (in_hook || !orig_open) return orig_open ? orig_open(pathname, flags) : -1;
+    in_hook = true;
+
+    int fd = orig_open(pathname, flags);
+    if (fd >= 0 && is_mountinfo_path(pathname)) {
+        char buffer[65536] = {0};
+        lseek(fd, 0, SEEK_SET);  // avoid pread
+        ssize_t len = read(fd, buffer, sizeof(buffer) - 1);
+        if (len > 0) {
+            std::string orig(buffer, len);
+            std::string spoofed = remap_mountinfo(orig);
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            mountinfo_cache[fd] = spoofed;
         }
-        return fd;
     }
-    return orig_open ? orig_open(pathname, flags) : -1;
+
+    in_hook = false;
+    return fd;
 }
 
-void init_mountinfo_hook(zygisk::Api *api, dev_t libc_dev, ino_t libc_ino) {
+void init_mountinfo_hook(Api *api, dev_t libc_dev, ino_t libc_ino) {
     api->pltHookRegister(libc_dev, libc_ino, "read", (void *)my_hooked_read, (void **)&orig_read);
     api->pltHookRegister(libc_dev, libc_ino, "open", (void *)my_hooked_open, (void **)&orig_open);
     LOGD("[mountinfo] installed read/open hooks via pltHookRegister");
