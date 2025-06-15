@@ -1,31 +1,26 @@
 #include <unistd.h>
 #include <fcntl.h>
-#include <dlfcn.h>
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <sstream>
+#include <mutex>
+#include <cstring>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <sstream>
-#include <cstring>
-#include <mutex>
 
 #include "log.h"
-#include "Dobby/dobby.h"
 
-static ssize_t (*orig_read)(int fd, void *buf, size_t count);
-static int (*orig_open)(const char *pathname, int flags, ...);
+static ssize_t (*orig_read)(int fd, void *buf, size_t count) = nullptr;
+static int (*orig_open)(const char *pathname, int flags, ...) = nullptr;
 
-static std::unordered_map<int, std::string> mountinfo_cache; // fd -> mapped content
+static std::unordered_map<int, std::string> mountinfo_cache;
 static std::mutex cache_mutex;
 
-// judge path /proc/*/mountinfo
 bool is_mountinfo_path(const char *path) {
-    if (!path) return false;
-    return strstr(path, "/proc/") && strstr(path, "/mountinfo");
+    return path && strstr(path, "/proc/") && strstr(path, "/mountinfo");
 }
 
-// extract list
 std::string get_column(const std::string &line, int index) {
     std::istringstream iss(line);
     std::string token;
@@ -35,7 +30,6 @@ std::string get_column(const std::string &line, int index) {
     return token;
 }
 
-// replace field (mount ID and peer group ID) 
 std::string remap_mountinfo(const std::string &orig) {
     std::istringstream iss(orig);
     std::ostringstream oss;
@@ -49,29 +43,26 @@ std::string remap_mountinfo(const std::string &orig) {
 
         if (mount_id.empty() || group_id.empty()) continue;
 
-        if (id_map.count(mount_id) == 0)
-            id_map[mount_id] = next_id++;
-        if (id_map.count(group_id) == 0)
-            id_map[group_id] = next_id++;
+        if (!id_map.count(mount_id)) id_map[mount_id] = next_id++;
+        if (!id_map.count(group_id)) id_map[group_id] = next_id++;
 
-        // replace original ID
-        size_t first_space = line.find(' ');
-        size_t second_space = line.find(' ', first_space + 1);
-        size_t third_space = line.find(' ', second_space + 1);
-        size_t fourth_space = line.find(' ', third_space + 1);
+        size_t first = line.find(' ');
+        size_t second = line.find(' ', first + 1);
+        size_t third = line.find(' ', second + 1);
+        size_t fourth = line.find(' ', third + 1);
 
-        if (first_space == std::string::npos || fourth_space == std::string::npos) continue;
+        if (first == std::string::npos || fourth == std::string::npos) continue;
 
         std::ostringstream replaced;
         replaced << id_map[mount_id] << " ";
-        replaced << line.substr(first_space + 1, third_space - first_space - 1) << " ";
-        replaced << id_map[group_id] << line.substr(fourth_space);
+        replaced << line.substr(first + 1, third - first - 1) << " ";
+        replaced << id_map[group_id] << line.substr(fourth);
         oss << replaced.str() << "\n";
     }
     return oss.str();
 }
 
-ssize_t hooked_read(int fd, void *buf, size_t count) {
+ssize_t my_hooked_read(int fd, void *buf, size_t count) {
     std::lock_guard<std::mutex> lock(cache_mutex);
     auto it = mountinfo_cache.find(fd);
     if (it != mountinfo_cache.end()) {
@@ -82,12 +73,12 @@ ssize_t hooked_read(int fd, void *buf, size_t count) {
         data.erase(0, len);
         return len;
     }
-    return orig_read(fd, buf, count);
+    return orig_read ? orig_read(fd, buf, count) : -1;
 }
 
-int hooked_open(const char *pathname, int flags, ...) {
+int my_hooked_open(const char *pathname, int flags, ...) {
     if (is_mountinfo_path(pathname)) {
-        int fd = orig_open(pathname, flags);
+        int fd = orig_open ? orig_open(pathname, flags) : -1;
         if (fd >= 0) {
             char buffer[65536] = {0};
             ssize_t len = pread(fd, buffer, sizeof(buffer) - 1, 0);
@@ -100,18 +91,11 @@ int hooked_open(const char *pathname, int flags, ...) {
         }
         return fd;
     }
-    return orig_open(pathname, flags);
+    return orig_open ? orig_open(pathname, flags) : -1;
 }
 
-void init_mountinfo_hook() {
-    void *libc = dlopen("libc.so", RTLD_NOW);
-    if (libc) {
-        void *read_sym = dlsym(libc, "read");
-        void *open_sym = dlsym(libc, "open");
-        if (read_sym && open_sym) {
-            DobbyHook(read_sym, (void *)hooked_read, (void **)&orig_read);
-            DobbyHook(open_sym, (void *)hooked_open, (void **)&orig_open);
-            LOGD("[mountinfo] hook installed");
-        }
-    }
+void init_mountinfo_hook(zygisk::Api *api, dev_t libc_dev, ino_t libc_ino) {
+    api->pltHookRegister(libc_dev, libc_ino, "read", (void *)my_hooked_read, (void **)&orig_read);
+    api->pltHookRegister(libc_dev, libc_ino, "open", (void *)my_hooked_open, (void **)&orig_open);
+    LOGD("[mountinfo] installed read/open hooks via pltHookRegister");
 }
