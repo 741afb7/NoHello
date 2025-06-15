@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <sstream>
 #include <mutex>
@@ -16,8 +17,10 @@ using zygisk::Api;
 
 static ssize_t (*orig_read)(int fd, void *buf, size_t count) = nullptr;
 static int (*orig_open)(const char *pathname, int flags, ...) = nullptr;
+static int (*orig_close)(int fd) = nullptr;
 
 static std::unordered_map<int, std::string> mountinfo_cache;
+static std::unordered_set<int> hooked_fds;
 static std::mutex cache_mutex;
 
 bool is_mountinfo_path(const char *path) {
@@ -73,9 +76,8 @@ ssize_t my_hooked_read(int fd, void *buf, size_t count) {
     ssize_t result = 0;
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        auto it = mountinfo_cache.find(fd);
-        if (it != mountinfo_cache.end()) {
-            std::string &data = it->second;
+        if (hooked_fds.count(fd)) {
+            std::string &data = mountinfo_cache[fd];
             if (data.empty()) {
                 result = 0;
             } else {
@@ -102,12 +104,13 @@ int my_hooked_open(const char *pathname, int flags, ...) {
     int fd = orig_open(pathname, flags);
     if (fd >= 0 && is_mountinfo_path(pathname)) {
         char buffer[65536] = {0};
-        lseek(fd, 0, SEEK_SET);  // avoid pread
+        lseek(fd, 0, SEEK_SET);
         ssize_t len = read(fd, buffer, sizeof(buffer) - 1);
         if (len > 0) {
             std::string orig(buffer, len);
             std::string spoofed = remap_mountinfo(orig);
             std::lock_guard<std::mutex> lock(cache_mutex);
+            hooked_fds.insert(fd);
             mountinfo_cache[fd] = spoofed;
         }
     }
@@ -116,8 +119,25 @@ int my_hooked_open(const char *pathname, int flags, ...) {
     return fd;
 }
 
+int my_hooked_close(int fd) {
+    static thread_local bool in_hook = false;
+    if (in_hook || !orig_close) return orig_close ? orig_close(fd) : -1;
+    in_hook = true;
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        hooked_fds.erase(fd);
+        mountinfo_cache.erase(fd);
+    }
+
+    int result = orig_close(fd);
+    in_hook = false;
+    return result;
+}
+
 void init_mountinfo_hook(Api *api, dev_t libc_dev, ino_t libc_ino) {
     api->pltHookRegister(libc_dev, libc_ino, "read", (void *)my_hooked_read, (void **)&orig_read);
     api->pltHookRegister(libc_dev, libc_ino, "open", (void *)my_hooked_open, (void **)&orig_open);
-    LOGD("[mountinfo] installed read/open hooks via pltHookRegister");
+    api->pltHookRegister(libc_dev, libc_ino, "close", (void *)my_hooked_close, (void **)&orig_close);
+    LOGD("[mountinfo] installed read/open/close hooks via pltHookRegister");
 }
