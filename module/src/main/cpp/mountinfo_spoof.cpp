@@ -111,7 +111,7 @@ void init_mountinfo_hook() {
         if (read_sym && open_sym) {
             DobbyHook(read_sym, (void *)hooked_read, (void **)&orig_read);
             DobbyHook(open_sym, (void *)hooked_open, (void **)&orig_open);
-            LOGI("[mountinfo] hook installed");
+            LOGD("[mountinfo] hook installed");
         }
     }
 }
