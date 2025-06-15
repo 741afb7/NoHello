@@ -310,6 +310,15 @@ public:
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
+	if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
+	{
+		if (!cdev || !cinode)
+		{
+			if (auto info = devinoby("libc.so")) std::tie(cdev, cinode) = *info;
+			else LOGE("Failed to get libc.so dev/inode for mountinfo hook");
+		}
+		if (cdev && cinode) init_mountinfo_hook(api, cdev, cinode);
+	}
         preSpecialize(args);
     }
 
