@@ -298,14 +298,14 @@ public:
     void onLoad(Api *_api, JNIEnv *_env) override {
         this->api = _api;
         this->env = _env;
-	std::tie(cdev, cinode) = devinoby("libc.so");
-	if (!cdev || !cinode)
+	if (auto info = devinoby("libc.so"))
 	{
-		LOGE("Failed to get libc.so dev/inode for mountinfo hook");
+		std::tie(cdev, cinode) = *info;
+		init_mountinfo_hook(api, cdev, cinode);
 	}
 	else
 	{
-		init_mountinfo_hook(api, cdev, cinode);
+		LOGE("Failed to get libc.so dev/inode for mountinfo hook");
 	}
     }
 
