@@ -298,7 +298,15 @@ public:
     void onLoad(Api *_api, JNIEnv *_env) override {
         this->api = _api;
         this->env = _env;
-	init_mountinfo_hook();
+	std::tie(cdev, cinode) = devinoby("libc.so");
+	if (!cdev || !cinode)
+	{
+		LOGE("Failed to get libc.so dev/inode for mountinfo hook");
+	}
+	else
+	{
+		init_mountinfo_hook(api, cdev, cinode);
+	}
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
