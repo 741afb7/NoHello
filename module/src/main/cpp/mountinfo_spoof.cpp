@@ -95,7 +95,7 @@ int my_hooked_open(const char *pathname, int flags, ...) {
     return orig_open ? orig_open(pathname, flags) : -1;
 }
 
-void init_mountinfo_hook(Api *api, dev_t libc_dev, ino_t libc_ino) {
+void init_mountinfo_hook(zygisk::Api *api, dev_t libc_dev, ino_t libc_ino) {
     api->pltHookRegister(libc_dev, libc_ino, "read", (void *)my_hooked_read, (void **)&orig_read);
     api->pltHookRegister(libc_dev, libc_ino, "open", (void *)my_hooked_open, (void **)&orig_open);
     LOGD("[mountinfo] installed read/open hooks via pltHookRegister");
