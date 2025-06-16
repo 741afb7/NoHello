@@ -119,9 +119,9 @@ int my_close(int fd) {
     return orig_close ? orig_close(fd) : -1;
 }
 
-void init_mountinfo_hook(Api *api, dev_t dev, ino_t ino) {
+void install_mountinfo_hook(zygisk::Api *api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "read", (void*)my_read, (void**)&orig_read);
     api->pltHookRegister(dev, ino, "open", (void*)my_open, (void**)&orig_open);
     api->pltHookRegister(dev, ino, "close", (void*)my_close, (void**)&orig_close);
-    LOGD("[mountinfo] installed stable read/open/close hooks");
+    LOGD("[mountinfo] installed hooks in preAppSpecialize stage");
 }
