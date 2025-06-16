@@ -20,6 +20,8 @@ static FILE *(*orig_fopen)(const char *, const char *) = nullptr;
 static ssize_t (*orig_readlink)(const char *, char *, size_t) = nullptr;
 static ssize_t (*orig_read)(int, void*, size_t) = nullptr;
 static ssize_t (*orig_pread)(int, void*, size_t, off_t) = nullptr;
+static FILE *(*orig_fopen64)(const char *, const char *) = nullptr;
+static ssize_t (*orig_readv)(int, const struct iovec *, int) = nullptr;
 
 static bool is_mountinfo_path(const char *path) {
     if (!path) return false;
@@ -226,6 +228,26 @@ ssize_t my_pread(int fd, void *buf, size_t count, off_t offset) {
     return orig_pread ? orig_pread(fd, buf, count, offset) : -1;
 }
 
+FILE *my_fopen64(const char *path, const char *mode) {
+    LOGD("[mountinfo] my_fopen64: path=%s", path);
+    return orig_fopen64 ? orig_fopen64(path, mode) : nullptr;
+}
+
+ssize_t my_readv(int fd, const struct iovec *iov, int iovcnt) {
+    char linkpath[PATH_MAX] = {};
+    snprintf(linkpath, sizeof(linkpath), "/proc/self/fd/%d", fd);
+    char target[PATH_MAX] = {};
+    ssize_t len = readlink(linkpath, target, sizeof(target) - 1);
+    if (len > 0) {
+        target[len] = '\0';
+        if (strstr(target, "mountinfo")) {
+            LOGD("[mountinfo] readv mountinfo fd=%d path=%s", fd, target);
+        }
+    }
+    return orig_readv ? orig_readv(fd, iov, iovcnt) : -1;
+}
+
+
 void install_mountinfo_hook(Api *api) {
     orig_open     = (int (*)(const char*, int, ...)) dlsym(RTLD_NEXT, "open");
     orig_openat   = (int (*)(int, const char*, int, ...)) dlsym(RTLD_NEXT, "openat");
@@ -233,6 +255,8 @@ void install_mountinfo_hook(Api *api) {
     orig_readlink = (ssize_t (*)(const char *, char *, size_t)) dlsym(RTLD_NEXT, "readlink");
     orig_read  = (ssize_t (*)(int, void*, size_t)) dlsym(RTLD_NEXT, "read");
     orig_pread = (ssize_t (*)(int, void*, size_t, off_t)) dlsym(RTLD_NEXT, "pread");
+    orig_fopen64 = (FILE *(*)(const char *, const char *)) dlsym(RTLD_NEXT, "fopen64");
+    orig_readv   = (ssize_t (*)(int, const struct iovec *, int)) dlsym(RTLD_NEXT, "readv");
 
     if (!orig_open)     LOGE("[mountinfo] dlsym failed for open");
     if (!orig_openat)   LOGE("[mountinfo] dlsym failed for openat");
@@ -242,4 +266,5 @@ void install_mountinfo_hook(Api *api) {
     if (!orig_pread) LOGE("[mountinfo] dlsym failed for pread");
 
     LOGD("[mountinfo] hook ready: open, openat, fopen, readlink, read, pread");
+    LOGD("[mountinfo] hook ready: fopen64, readv");
 }
