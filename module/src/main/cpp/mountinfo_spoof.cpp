@@ -17,6 +17,7 @@ using zygisk::Api;
 static int (*orig_open)(const char*, int, ...) = nullptr;
 static int (*orig_openat)(int, const char*, int, ...) = nullptr;
 static FILE *(*orig_fopen)(const char *, const char *) = nullptr;
+static ssize_t (*orig_readlink)(const char *, char *, size_t) = nullptr;
 
 static bool is_mountinfo_path(const char *path) {
     if (!path) return false;
@@ -24,10 +25,11 @@ static bool is_mountinfo_path(const char *path) {
         LOGD("[mountinfo] matched path: %s", path);
         return true;
     }
-    LOGD("[mountinfo] opened file: %s", path);  // log every open path
+    LOGD("[mountinfo] opened file: %s", path);
     return false;
 }
 
+// generate mountinfo
 static void generate_spoofed_mountinfo(char **data, size_t *length) {
     FILE *f = fopen("/proc/self/mountinfo", "r");
     if (!f) return;
@@ -41,7 +43,7 @@ static void generate_spoofed_mountinfo(char **data, size_t *length) {
         return;
     }
 
-    int fixed_id = 1;
+    int fake_id = 1;
     while (getline(&line, &len, f) != -1) {
         char *saveptr = nullptr;
         char *tokens[64];
@@ -63,8 +65,8 @@ static void generate_spoofed_mountinfo(char **data, size_t *length) {
 
         if (sep == -1 || sep < 6) continue;
 
-        snprintf(tokens[0], strlen(tokens[0]) + 1, "%d", fixed_id);
-        snprintf(tokens[1], strlen(tokens[1]) + 1, "%d", fixed_id);
+        snprintf(tokens[0], strlen(tokens[0]) + 1, "%d", fake_id);
+        snprintf(tokens[1], strlen(tokens[1]) + 1, "%d", fake_id);
         snprintf(tokens[2], strlen(tokens[2]) + 1, "0:1");
 
         for (int i = 6; i < sep; ++i) {
@@ -78,6 +80,8 @@ static void generate_spoofed_mountinfo(char **data, size_t *length) {
                 total += snprintf(result + total, 65536 - total, "%s%s", tokens[i], (i + 1 == tok_idx) ? "\n" : " ");
             }
         }
+
+        ++fake_id;
     }
 
     if (line) free(line);
@@ -86,6 +90,7 @@ static void generate_spoofed_mountinfo(char **data, size_t *length) {
     *length = total;
 }
 
+// open()
 int my_open(const char *path, int flags, ...) {
     if (!orig_open)
         return -1;
@@ -100,9 +105,7 @@ int my_open(const char *path, int flags, ...) {
     char *data = nullptr;
     size_t len = 0;
     generate_spoofed_mountinfo(&data, &len);
-    if (!data || len == 0) {
-        return fd;
-    }
+    if (!data || len == 0) return fd;
 
     int pipefd[2];
     if (pipe(pipefd) != 0) {
@@ -117,6 +120,7 @@ int my_open(const char *path, int flags, ...) {
     return pipefd[0];
 }
 
+// openat()
 int my_openat(int dirfd, const char *path, int flags, ...) {
     if (!orig_openat)
         return -1;
@@ -128,13 +132,10 @@ int my_openat(int dirfd, const char *path, int flags, ...) {
     if (!is_mountinfo_path(path))
         return fd;
 
-    // reuse spoof logic
     char *data = nullptr;
     size_t len = 0;
     generate_spoofed_mountinfo(&data, &len);
-    if (!data || len == 0) {
-        return fd;
-    }
+    if (!data || len == 0) return fd;
 
     int pipefd[2];
     if (pipe(pipefd) != 0) {
@@ -149,6 +150,7 @@ int my_openat(int dirfd, const char *path, int flags, ...) {
     return pipefd[0];
 }
 
+// fopen()
 FILE *my_fopen(const char *path, const char *mode) {
     if (!orig_fopen)
         return nullptr;
@@ -157,12 +159,13 @@ FILE *my_fopen(const char *path, const char *mode) {
     if (!fp || !is_mountinfo_path(path))
         return fp;
 
-    // mimic spoof
-    int pipefd[2];
     char *data = nullptr;
     size_t len = 0;
     generate_spoofed_mountinfo(&data, &len);
-    if (!data || pipe(pipefd) != 0) {
+    if (!data || len == 0) return fp;
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
         free(data);
         return fp;
     }
@@ -170,18 +173,28 @@ FILE *my_fopen(const char *path, const char *mode) {
     write(pipefd[1], data, len);
     close(pipefd[1]);
     free(data);
-    fclose(fp); // close real file
+    fclose(fp);  // close real file
     return fdopen(pipefd[0], mode);
 }
 
+// readlink()
+ssize_t my_readlink(const char *path, char *buf, size_t bufsiz) {
+    if (strstr(path, "/proc/") && strstr(path, "/fd/")) {
+        LOGD("[mountinfo] readlink intercepted: %s", path);
+    }
+    return orig_readlink ? orig_readlink(path, buf, bufsiz) : -1;
+}
+
 void install_mountinfo_hook(Api *api) {
-    orig_open = (int (*)(const char*, int, ...)) dlsym(RTLD_NEXT, "open");
-    orig_openat = (int (*)(int, const char*, int, ...)) dlsym(RTLD_NEXT, "openat");
-    orig_fopen = (FILE *(*)(const char *, const char *)) dlsym(RTLD_NEXT, "fopen");
+    orig_open     = (int (*)(const char*, int, ...)) dlsym(RTLD_NEXT, "open");
+    orig_openat   = (int (*)(int, const char*, int, ...)) dlsym(RTLD_NEXT, "openat");
+    orig_fopen    = (FILE *(*)(const char *, const char *)) dlsym(RTLD_NEXT, "fopen");
+    orig_readlink = (ssize_t (*)(const char *, char *, size_t)) dlsym(RTLD_NEXT, "readlink");
 
-    if (!orig_open)   LOGE("[mountinfo] dlsym failed for open");
-    if (!orig_openat) LOGE("[mountinfo] dlsym failed for openat");
-    if (!orig_fopen)  LOGE("[mountinfo] dlsym failed for fopen");
+    if (!orig_open)     LOGE("[mountinfo] dlsym failed for open");
+    if (!orig_openat)   LOGE("[mountinfo] dlsym failed for openat");
+    if (!orig_fopen)    LOGE("[mountinfo] dlsym failed for fopen");
+    if (!orig_readlink) LOGE("[mountinfo] dlsym failed for readlink");
 
-    LOGD("[mountinfo] hook ready: open, openat, fopen");
+    LOGD("[mountinfo] hook ready: open, openat, fopen, readlink");
 }
