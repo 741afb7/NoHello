@@ -75,7 +75,7 @@ ssize_t my_read(int fd, void *buf, size_t count) {
     static __thread bool in_hook = false;
     if (in_hook || !orig_read) return orig_read ? orig_read(fd, buf, count) : -1;
     in_hook = true;
-
+    LOGD("[mountinfo] my_read invoked on fd %d", fd);
     int index = find_fd_index(fd);
     if (index != -1 && fd_data[index]) {
         size_t remain = fd_len[index] - fd_offset[index];
@@ -95,7 +95,7 @@ int my_open(const char *path, int flags, ...) {
     static __thread bool in_hook = false;
     if (in_hook || !orig_open) return orig_open ? orig_open(path, flags) : -1;
     in_hook = true;
-
+    LOGD("[mountinfo] my_open invoked on path: %s", path);
     int fd = orig_open(path, flags);
     if (fd >= 0 && is_mountinfo_path(path)) {
         char tmp[65536] = {0};
@@ -124,5 +124,6 @@ void install_mountinfo_hook(zygisk::Api *api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "read", (void*)my_read, (void**)&orig_read);
     api->pltHookRegister(dev, ino, "open", (void*)my_open, (void**)&orig_open);
     api->pltHookRegister(dev, ino, "close", (void*)my_close, (void**)&orig_close);
-    LOGD("[mountinfo] installed hooks in preAppSpecialize stage");
+    api->pltHookCommit();
+    LOGD("[mountinfo] installed hooks and committed them");
 }
