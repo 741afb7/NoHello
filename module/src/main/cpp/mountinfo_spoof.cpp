@@ -7,32 +7,115 @@
 #include <errno.h>
 #include <android/log.h>
 #include <sys/mount.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <unordered_map>
+#include <string>
 
 #include "zygisk.hpp"
 #include "log.h"
 
 using zygisk::Api;
 
-static void perform_bind_mount_spoof(const char *processName) {
-    LOGI("[bind_mount] Attempting bind-mount spoof for process: %s", processName);
+static int memfd_create(const char *name, unsigned int flags) {
+    return syscall(SYS_memfd_create, name, flags);
+}
 
-    const char *fake_path = "/data/adb/modules/zygisk_nohello/fake_mountinfo";
+bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
+    FILE *f = fopen("/proc/self/mountinfo", "r");
+    if (!f) {
+        LOGE("[memfd] Failed to open mountinfo: %s", strerror(errno));
+        return false;
+    }
 
-    if (access(fake_path, F_OK) != 0) {
-        LOGE("[bind_mount] Spoof file does not exist: %s", fake_path);
+    char *line = nullptr;
+    size_t len = 0;
+    size_t total = 0;
+    char *result = (char *)malloc(65536);
+    if (!result) {
+        fclose(f);
+        LOGE("[memfd] Memory allocation failed");
+        return false;
+    }
+
+    int fake_id = 1;
+    std::unordered_map<std::string, int> shared_map;
+
+    while (getline(&line, &len, f) != -1) {
+        char *tokens[64];
+        int tok_idx = 0;
+        char *saveptr = nullptr;
+        char *token = strtok_r(line, " ", &saveptr);
+        while (token && tok_idx < 64) {
+            tokens[tok_idx++] = token;
+            token = strtok_r(nullptr, " ", &saveptr);
+        }
+
+        for (int i = 6; i < tok_idx; ++i) {
+            if (strstr(tokens[i], "shared:")) {
+                std::string original = tokens[i];
+                if (!shared_map.count(original)) {
+                    shared_map[original] = fake_id++;
+                }
+                snprintf(tokens[i], strlen(tokens[i]) + 1, "shared:%d", shared_map[original]);
+            }
+        }
+
+        for (int i = 0; i < tok_idx; ++i) {
+            total += snprintf(result + total, 65536 - total, "%s%s", tokens[i], (i + 1 == tok_idx) ? "\n" : " ");
+        }
+    }
+
+    free(line);
+    fclose(f);
+    *out_data = result;
+    *out_len = total;
+    return true;
+}
+
+static void perform_memfd_bind_mount_spoof(const char *processName) {
+    LOGI("[memfd] Performing in-memory spoof for process: %s", processName);
+
+    char *data = nullptr;
+    size_t datalen = 0;
+
+    if (!generate_spoofed_mountinfo_content(&data, &datalen)) {
+        LOGE("[memfd] Failed to generate spoofed content");
         return;
     }
 
-    int res = mount(fake_path, "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
-    if (res == 0) {
-        LOGI("[bind_mount] Successfully bind-mounted %s -> /proc/self/mountinfo", fake_path);
-    } else {
-        LOGE("[bind_mount] Failed to bind mount: %s -> /proc/self/mountinfo (%s)", fake_path, strerror(errno));
+    int memfd = memfd_create("mountinfo_memfd", 0);
+    if (memfd < 0) {
+        LOGE("[memfd] memfd_create failed: %s", strerror(errno));
+        free(data);
+        return;
     }
+
+    if (write(memfd, data, datalen) != (ssize_t)datalen) {
+        LOGE("[memfd] write to memfd failed");
+        close(memfd);
+        free(data);
+        return;
+    }
+
+    free(data);
+
+    int res = mount("/proc/self/fd/%d", "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
+    char memfd_path[64];
+    snprintf(memfd_path, sizeof(memfd_path), "/proc/self/fd/%d", memfd);
+
+    res = mount(memfd_path, "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
+    if (res == 0) {
+        LOGI("[memfd] Successfully bind-mounted memfd -> /proc/self/mountinfo");
+    } else {
+        LOGE("[memfd] Failed to bind mount memfd: %s", strerror(errno));
+    }
+
+    close(memfd);
 }
 
 void install_mountinfo_hook(Api *api, const char *processName) {
     LOGD("[zygisk] install_mountinfo_hook for process: %s", processName);
-    perform_bind_mount_spoof(processName);
-    LOGD("[zygisk] mountinfo bind spoof complete");
+    perform_memfd_bind_mount_spoof(processName);
+    LOGD("[zygisk] mountinfo spoof via memfd complete");
 }
