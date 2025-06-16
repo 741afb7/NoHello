@@ -7,7 +7,6 @@
 #include <android/log.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <execinfo.h>
 #include <dlfcn.h>
 
 #include "zygisk.hpp"
@@ -16,10 +15,17 @@
 using zygisk::Api;
 
 static int (*orig_open)(const char*, int, ...) = nullptr;
+static int (*orig_openat)(int, const char*, int, ...) = nullptr;
 static FILE *(*orig_fopen)(const char *, const char *) = nullptr;
 
 static bool is_mountinfo_path(const char *path) {
-    return path && strstr(path, "/proc/") && strstr(path, "/mountinfo");
+    if (!path) return false;
+    if (strstr(path, "/mountinfo")) {
+        LOGD("[mountinfo] matched path: %s", path);
+        return true;
+    }
+    LOGD("[mountinfo] opened file: %s", path);  // log every open path
+    return false;
 }
 
 static void generate_spoofed_mountinfo(char **data, size_t *length) {
@@ -81,8 +87,6 @@ static void generate_spoofed_mountinfo(char **data, size_t *length) {
 }
 
 int my_open(const char *path, int flags, ...) {
-    LOGD("[mountinfo] my_open intercepted path: %s", path);
-
     if (!orig_open)
         return -1;
 
@@ -97,7 +101,6 @@ int my_open(const char *path, int flags, ...) {
     size_t len = 0;
     generate_spoofed_mountinfo(&data, &len);
     if (!data || len == 0) {
-        LOGW("[mountinfo] failed to spoof mountinfo, fallback to original");
         return fd;
     }
 
@@ -111,34 +114,74 @@ int my_open(const char *path, int flags, ...) {
     close(pipefd[1]);
     free(data);
     close(fd);
+    return pipefd[0];
+}
 
-    LOGD("[mountinfo] replaced mountinfo fd %d with pipe %d", fd, pipefd[0]);
+int my_openat(int dirfd, const char *path, int flags, ...) {
+    if (!orig_openat)
+        return -1;
+
+    int fd = orig_openat(dirfd, path, flags);
+    if (fd < 0)
+        return fd;
+
+    if (!is_mountinfo_path(path))
+        return fd;
+
+    // reuse spoof logic
+    char *data = nullptr;
+    size_t len = 0;
+    generate_spoofed_mountinfo(&data, &len);
+    if (!data || len == 0) {
+        return fd;
+    }
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        free(data);
+        return fd;
+    }
+
+    write(pipefd[1], data, len);
+    close(pipefd[1]);
+    free(data);
+    close(fd);
     return pipefd[0];
 }
 
 FILE *my_fopen(const char *path, const char *mode) {
-    LOGD("[mountinfo] my_fopen intercepted path: %s", path);
+    if (!orig_fopen)
+        return nullptr;
 
-    if (is_mountinfo_path(path)) {
-        int fd = my_open(path, O_RDONLY);
-        if (fd >= 0) {
-            return fdopen(fd, mode);
-        }
+    FILE *fp = orig_fopen(path, mode);
+    if (!fp || !is_mountinfo_path(path))
+        return fp;
+
+    // mimic spoof
+    int pipefd[2];
+    char *data = nullptr;
+    size_t len = 0;
+    generate_spoofed_mountinfo(&data, &len);
+    if (!data || pipe(pipefd) != 0) {
+        free(data);
+        return fp;
     }
 
-    return orig_fopen ? orig_fopen(path, mode) : nullptr;
+    write(pipefd[1], data, len);
+    close(pipefd[1]);
+    free(data);
+    fclose(fp); // close real file
+    return fdopen(pipefd[0], mode);
 }
 
 void install_mountinfo_hook(Api *api) {
     orig_open = (int (*)(const char*, int, ...)) dlsym(RTLD_NEXT, "open");
-    if (!orig_open) {
-        LOGE("[mountinfo] dlsym failed for open");
-    }
-
+    orig_openat = (int (*)(int, const char*, int, ...)) dlsym(RTLD_NEXT, "openat");
     orig_fopen = (FILE *(*)(const char *, const char *)) dlsym(RTLD_NEXT, "fopen");
-    if (!orig_fopen) {
-        LOGE("[mountinfo] dlsym failed for fopen");
-    }
 
-    LOGD("[mountinfo] ready to replace mountinfo file access dynamically");
+    if (!orig_open)   LOGE("[mountinfo] dlsym failed for open");
+    if (!orig_openat) LOGE("[mountinfo] dlsym failed for openat");
+    if (!orig_fopen)  LOGE("[mountinfo] dlsym failed for fopen");
+
+    LOGD("[mountinfo] hook ready: open, openat, fopen");
 }
