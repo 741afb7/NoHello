@@ -36,7 +36,7 @@
 #include "MountRuleParser.cpp"
 #include "external/emoji.h"
 
-extern void install_mountinfo_hook(zygisk::Api *api);
+extern void install_mountinfo_hook(Api *api, const char *processName);
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
