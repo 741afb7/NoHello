@@ -36,7 +36,7 @@
 #include "MountRuleParser.cpp"
 #include "external/emoji.h"
 
-extern void install_mountinfo_hook(zygisk::Api *api, dev_t libc_dev, ino_t libc_ino);
+extern void install_mountinfo_hook(zygisk::Api *api);
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
@@ -311,9 +311,8 @@ public:
 			auto info = devinobymap("libc.so");
 			if (info.first && info.second)
 			{
-				auto [dev, ino] = info;
 				LOGD("[zygisk] resolved libc.so via maps: dev=%lu ino=%lu", (unsigned long)dev, (unsigned long)ino);
-				install_mountinfo_hook(api, dev, ino);
+				install_mountinfo_hook(api);
 			}
 			else LOGW("[zygisk] failed to find valid dev/inode for libc.so");
 		}
