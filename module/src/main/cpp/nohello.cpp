@@ -309,9 +309,9 @@ public:
 		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
 		{
 			auto info = devinobymap("libc.so");
-			if (info)
+			if (info.has_value())
 			{
-				auto [dev, ino] = *info;
+				auto [dev, ino] = info.value();
 				LOGD("[zygisk] resolved libc.so via maps: dev=%lu ino=%lu", (unsigned long)dev, (unsigned long)ino);
 				install_mountinfo_hook(api, dev, ino);
 			}
