@@ -10,17 +10,23 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <android/log.h>
+#include <dlfcn.h>
+#include <stdio.h>
 
 #include "log.h"
 #include "zygisk.hpp"
 using zygisk::Api;
 
-static ssize_t (*orig_read)(int fd, void *buf, size_t count) = nullptr;
-static int (*orig_open)(const char *pathname, int flags, ...) = nullptr;
-static int (*orig_close)(int fd) = nullptr;
+static ssize_t (*orig_read)(int, void*, size_t) = nullptr;
+static int (*orig_open)(const char*, int, ...) = nullptr;
+static int (*orig_close)(int) = nullptr;
+static FILE* (*orig_fopen)(const char*, const char*) = nullptr;
+static char* (*orig_fgets)(char*, int, FILE*) = nullptr;
 
 static std::unordered_map<int, std::string> mountinfo_cache;
+static std::unordered_map<FILE*, std::istringstream> mountinfo_fp_streams;
 static std::unordered_set<int> hooked_fds;
+static std::unordered_set<FILE*> hooked_fps;
 static std::mutex cache_mutex;
 
 bool is_mountinfo_path(const char *path) {
@@ -85,6 +91,7 @@ ssize_t my_hooked_read(int fd, void *buf, size_t count) {
                 memcpy(buf, data.data(), len);
                 data.erase(0, len);
                 result = static_cast<ssize_t>(len);
+                LOGD("[mountinfo] read spoofed %zd bytes from fd %d", result, fd);
             }
             in_hook = false;
             return result;
@@ -107,11 +114,11 @@ int my_hooked_open(const char *pathname, int flags, ...) {
         lseek(fd, 0, SEEK_SET);
         ssize_t len = read(fd, buffer, sizeof(buffer) - 1);
         if (len > 0) {
-            std::string orig(buffer, len);
-            std::string spoofed = remap_mountinfo(orig);
+            std::string spoofed = remap_mountinfo(std::string(buffer, len));
             std::lock_guard<std::mutex> lock(cache_mutex);
             hooked_fds.insert(fd);
             mountinfo_cache[fd] = spoofed;
+            LOGD("[mountinfo] spoofed content for fd %d (%s)", fd, pathname);
         }
     }
 
@@ -126,8 +133,10 @@ int my_hooked_close(int fd) {
 
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        hooked_fds.erase(fd);
-        mountinfo_cache.erase(fd);
+        if (hooked_fds.erase(fd)) {
+            mountinfo_cache.erase(fd);
+            LOGD("[mountinfo] cleaned fd %d from cache", fd);
+        }
     }
 
     int result = orig_close(fd);
@@ -135,9 +144,56 @@ int my_hooked_close(int fd) {
     return result;
 }
 
-void init_mountinfo_hook(Api *api, dev_t libc_dev, ino_t libc_ino) {
-    api->pltHookRegister(libc_dev, libc_ino, "read", (void *)my_hooked_read, (void **)&orig_read);
-    api->pltHookRegister(libc_dev, libc_ino, "open", (void *)my_hooked_open, (void **)&orig_open);
-    api->pltHookRegister(libc_dev, libc_ino, "close", (void *)my_hooked_close, (void **)&orig_close);
-    LOGD("[mountinfo] installed read/open/close hooks via pltHookRegister");
+FILE* my_hooked_fopen(const char* path, const char* mode) {
+    FILE* fp = orig_fopen ? orig_fopen(path, mode) : nullptr;
+    if (fp && is_mountinfo_path(path)) {
+        char buffer[65536] = {0};
+        int fd = fileno(fp);
+        lseek(fd, 0, SEEK_SET);
+        ssize_t len = read(fd, buffer, sizeof(buffer) - 1);
+        if (len > 0) {
+            std::string spoofed = remap_mountinfo(std::string(buffer, len));
+            std::lock_guard<std::mutex> lock(cache_mutex);
+            hooked_fps.insert(fp);
+            mountinfo_fp_streams[fp] = std::istringstream(spoofed);
+            LOGD("[mountinfo] spoofed content for FILE* %p (%s)", fp, path);
+        }
+    }
+    return fp;
+}
+
+char* my_hooked_fgets(char* buf, int size, FILE* stream) {
+    static thread_local bool in_hook = false;
+    if (in_hook || !orig_fgets) return orig_fgets ? orig_fgets(buf, size, stream) : nullptr;
+    in_hook = true;
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto it = mountinfo_fp_streams.find(stream);
+        if (it != mountinfo_fp_streams.end()) {
+            if (it->second.getline(buf, size)) {
+                LOGD("[mountinfo] fgets spoofed line: %s", buf);
+                in_hook = false;
+                return buf;
+            } else {
+                mountinfo_fp_streams.erase(it);
+                hooked_fps.erase(stream);
+                in_hook = false;
+                return nullptr;
+            }
+        }
+    }
+
+    char* res = orig_fgets(buf, size, stream);
+    in_hook = false;
+    return res;
+}
+
+void init_mountinfo_hook(Api* api, dev_t libc_dev, ino_t libc_ino) {
+    api->pltHookRegister(libc_dev, libc_ino, "read", (void*)my_hooked_read, (void**)&orig_read);
+    api->pltHookRegister(libc_dev, libc_ino, "open", (void*)my_hooked_open, (void**)&orig_open);
+    api->pltHookRegister(libc_dev, libc_ino, "close", (void*)my_hooked_close, (void**)&orig_close);
+    api->pltHookRegister(libc_dev, libc_ino, "fopen", (void*)my_hooked_fopen, (void**)&orig_fopen);
+    api->pltHookRegister(libc_dev, libc_ino, "fgets", (void*)my_hooked_fgets, (void**)&orig_fgets);
+    LOGD("[mountinfo] installed read/open/close/fopen/fgets hooks");
 }
