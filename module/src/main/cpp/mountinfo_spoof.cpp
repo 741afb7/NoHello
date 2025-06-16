@@ -22,18 +22,6 @@ static bool is_mountinfo_path(const char *path) {
     return path && strstr(path, "/proc/") && strstr(path, "/mountinfo");
 }
 
-static void log_backtrace(const char *tag) {
-    void *bt[10];
-    int sz = backtrace(bt, 10);
-    char **syms = backtrace_symbols(bt, sz);
-    if (syms) {
-        for (int i = 0; i < sz; ++i) {
-            LOGD("[%s] backtrace #%d: %s", tag, i, syms[i]);
-        }
-        free(syms);
-    }
-}
-
 static void generate_spoofed_mountinfo(char **data, size_t *length) {
     FILE *f = fopen("/proc/self/mountinfo", "r");
     if (!f) return;
@@ -94,7 +82,6 @@ static void generate_spoofed_mountinfo(char **data, size_t *length) {
 
 int my_open(const char *path, int flags, ...) {
     LOGD("[mountinfo] my_open intercepted path: %s", path);
-    //log_backtrace("my_open");
 
     if (!orig_open)
         return -1;
@@ -131,7 +118,6 @@ int my_open(const char *path, int flags, ...) {
 
 FILE *my_fopen(const char *path, const char *mode) {
     LOGD("[mountinfo] my_fopen intercepted path: %s", path);
-    //log_backtrace("my_fopen");
 
     if (is_mountinfo_path(path)) {
         int fd = my_open(path, O_RDONLY);
