@@ -1,137 +1,96 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <android/log.h>
 #include <stdio.h>
-#include <stdbool.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <android/log.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/system_properties.h>
 #include <dlfcn.h>
 
 #include "zygisk.hpp"
 #include "log.h"
+
 using zygisk::Api;
 
-static ssize_t (*orig_read)(int, void*, size_t) = nullptr;
 static int (*orig_open)(const char*, int, ...) = nullptr;
-static int (*orig_close)(int) = nullptr;
-
-#define MAX_HOOKED_FD 4
-static int hooked_fds[MAX_HOOKED_FD] = {-1, -1, -1, -1};
-static char *fd_data[MAX_HOOKED_FD] = {0};
-static size_t fd_len[MAX_HOOKED_FD] = {0};
-static size_t fd_offset[MAX_HOOKED_FD] = {0};
 
 static bool is_mountinfo_path(const char *path) {
     return path && strstr(path, "/proc/") && strstr(path, "/mountinfo");
 }
 
-static int find_fd_index(int fd) {
-    for (int i = 0; i < MAX_HOOKED_FD; ++i) {
-        if (hooked_fds[i] == fd) return i;
+static void generate_spoofed_mountinfo(char **data, size_t *length) {
+    FILE *f = fopen("/proc/self/mountinfo", "r");
+    if (!f) return;
+    char *line = nullptr;
+    size_t len = 0;
+    size_t total = 0;
+    char *result = (char *)malloc(65536);  // enough buffer
+    if (!result) {
+        fclose(f);
+        return;
     }
-    return -1;
-}
-
-static void clear_fd(int index) {
-    if (index >= 0 && index < MAX_HOOKED_FD) {
-        free(fd_data[index]);
-        fd_data[index] = NULL;
-        fd_len[index] = 0;
-        fd_offset[index] = 0;
-        hooked_fds[index] = -1;
-    }
-}
-
-static void spoof_mountinfo(int fd, const char *raw, size_t len) {
-    char *buf = (char *)malloc(len + 1);
-    if (!buf) return;
-    memcpy(buf, raw, len);
-    buf[len] = '\0';
-
-    int fake_id = 1;
-    for (size_t i = 0; i < len; ++i) {
-        if (i == 0 || buf[i - 1] == '\n') {
-            int n = snprintf(buf + i, len - i, "%d", fake_id++);
-            i += (n > 0) ? (n - 1) : 0;
+    int id = 100;
+    while (getline(&line, &len, f) != -1) {
+        char *space = strchr(line, ' ');
+        if (space) {
+            int n = snprintf(result + total, 65536 - total, "%d%s", id++, space);
+            total += n;
         }
     }
-
-    for (int i = 0; i < MAX_HOOKED_FD; ++i) {
-        if (hooked_fds[i] == -1) {
-            hooked_fds[i] = fd;
-            fd_data[i] = buf;
-            fd_len[i] = len;
-            fd_offset[i] = 0;
-            LOGD("[mountinfo] spoofed and cached fd %d at slot %d", fd, i);
-            return;
-        }
-    }
-    free(buf);
-}
-
-ssize_t my_read(int fd, void *buf, size_t count) {
-    if (!orig_read) return -1;
-    int index = find_fd_index(fd);
-    if (index == -1 || !fd_data[index]) {
-        return orig_read(fd, buf, count);
-    }
-
-    LOGD("[mountinfo] my_read invoked on spoofed fd %d", fd);
-
-    size_t remain = fd_len[index] - fd_offset[index];
-    size_t to_copy = (remain > count) ? count : remain;
-    memcpy(buf, fd_data[index] + fd_offset[index], to_copy);
-    fd_offset[index] += to_copy;
-    return (ssize_t)to_copy;
+    if (line) free(line);
+    fclose(f);
+    *data = result;
+    *length = total;
 }
 
 int my_open(const char *path, int flags, ...) {
-    if (!orig_open) return -1;
-    LOGD("[mountinfo] my_open invoked on path: %s", path);
+    LOGD("[mountinfo] my_open intercepted path: %s", path);
+
+    if (!orig_open)
+        return -1;
 
     int fd = orig_open(path, flags);
-    if (fd >= 0 && is_mountinfo_path(path)) {
-        char tmp[65536] = {0};
-        lseek(fd, 0, SEEK_SET);
-        ssize_t len = orig_read ? orig_read(fd, tmp, sizeof(tmp) - 1) : -1;
-        LOGD("[mountinfo] read() in open-hook used orig_read on fd %d -> len %zd", fd, len);
-        if (len > 0) {
-            spoof_mountinfo(fd, tmp, (size_t)len);
-        }
+    if (fd < 0)
+        return fd;
+
+    if (!is_mountinfo_path(path))
+        return fd;
+
+    // generate spoofed data
+    char *data = nullptr;
+    size_t len = 0;
+    generate_spoofed_mountinfo(&data, &len);
+    if (!data || len == 0) {
+        LOGW("[mountinfo] failed to spoof mountinfo, fallback to original");
+        return fd;
     }
 
-    return fd;
+    // create pipe
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        free(data);
+        return fd;
+    }
+
+    // write spoofed content
+    write(pipefd[1], data, len);
+    close(pipefd[1]);
+    free(data);
+    close(fd);  // close original mountinfo fd
+
+    LOGD("[mountinfo] replaced mountinfo fd %d with pipe %d", fd, pipefd[0]);
+    return pipefd[0];
 }
 
-int my_close(int fd) {
-    int index = find_fd_index(fd);
-    if (index != -1) {
-        clear_fd(index);
-        LOGD("[mountinfo] closed and cleared fd %d", fd);
-    }
-    return orig_close ? orig_close(fd) : -1;
-}
-
-void install_mountinfo_hook(zygisk::Api *api, dev_t dev, ino_t ino) {
-    api->pltHookRegister(dev, ino, "read",  (void*)my_read,  (void**)&orig_read);
-    api->pltHookRegister(dev, ino, "open",  (void*)my_open,  (void**)&orig_open);
-    api->pltHookRegister(dev, ino, "close", (void*)my_close, (void**)&orig_close);
-
-    FILE *maps = fopen("/proc/self/maps", "r");
-    if (maps) {
-        char line[512];
-        while (fgets(line, sizeof(line), maps)) {
-            if (strstr(line, "libc.so")) {
-                LOGD("[mountinfo] hooking libc target line: %s", line);
-            }
-        }
-        fclose(maps);
-    } else {
-        LOGW("[mountinfo] failed to read /proc/self/maps");
+void install_mountinfo_hook(Api *api) {
+    orig_open = (int (*)(const char*, int, ...)) dlsym(RTLD_NEXT, "open");
+    if (!orig_open) {
+        LOGE("[mountinfo] dlsym failed for open");
+        return;
     }
 
-    api->pltHookCommit();
-    LOGD("[mountinfo] installed hooks with cache-limited fd filtering");
+    LOGD("[mountinfo] ready to replace mountinfo file access dynamically");
 }
