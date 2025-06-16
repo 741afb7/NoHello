@@ -7,6 +7,7 @@
 #include <android/log.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/system_properties.h>
 #include <dlfcn.h>
 
 #include "zygisk.hpp"
@@ -23,54 +24,22 @@ static bool is_mountinfo_path(const char *path) {
 static void generate_spoofed_mountinfo(char **data, size_t *length) {
     FILE *f = fopen("/proc/self/mountinfo", "r");
     if (!f) return;
-
     char *line = nullptr;
     size_t len = 0;
     size_t total = 0;
-    char *result = (char *)malloc(65536); 
+    char *result = (char *)malloc(65536);  // enough buffer
     if (!result) {
         fclose(f);
         return;
     }
-
-    int fixed_id = 1;
+    int id = 100;
     while (getline(&line, &len, f) != -1) {
-        char *saveptr = nullptr;
-        char *tokens[64];
-        int tok_idx = 0;
-
-        char *token = strtok_r(line, " ", &saveptr);
-        while (token && tok_idx < 64) {
-            tokens[tok_idx++] = token;
-            token = strtok_r(nullptr, " ", &saveptr);
-        }
-        int sep = -1;
-        for (int i = 0; i < tok_idx; ++i) {
-            if (strcmp(tokens[i], "-") == 0) {
-                sep = i;
-                break;
-            }
-        }
-
-        if (sep == -1 || sep < 6) continue; // 非法行
-
-        snprintf(tokens[0], strlen(tokens[0]) + 1, "%d", fixed_id); // mount ID
-        snprintf(tokens[1], strlen(tokens[1]) + 1, "%d", fixed_id); // parent ID
-        snprintf(tokens[2], strlen(tokens[2]) + 1, "0:1");          // major:minor
-
-        for (int i = 6; i < sep; ++i) {
-            if (strstr(tokens[i], "shared:") || strstr(tokens[i], "master:") || strstr(tokens[i], "propagate_from:")) {
-                tokens[i][0] = '\0';  // 清空该字段
-            }
-        }
-
-        for (int i = 0; i < tok_idx; ++i) {
-            if (tokens[i][0] != '\0') {
-                total += snprintf(result + total, 65536 - total, "%s%s", tokens[i], (i + 1 == tok_idx) ? "\n" : " ");
-            }
+        char *space = strchr(line, ' ');
+        if (space) {
+            int n = snprintf(result + total, 65536 - total, "%d%s", id++, space);
+            total += n;
         }
     }
-
     if (line) free(line);
     fclose(f);
     *data = result;
@@ -90,6 +59,7 @@ int my_open(const char *path, int flags, ...) {
     if (!is_mountinfo_path(path))
         return fd;
 
+    // generate spoofed data
     char *data = nullptr;
     size_t len = 0;
     generate_spoofed_mountinfo(&data, &len);
@@ -98,16 +68,18 @@ int my_open(const char *path, int flags, ...) {
         return fd;
     }
 
+    // create pipe
     int pipefd[2];
     if (pipe(pipefd) != 0) {
         free(data);
         return fd;
     }
 
+    // write spoofed content
     write(pipefd[1], data, len);
     close(pipefd[1]);
     free(data);
-    close(fd);
+    close(fd);  // close original mountinfo fd
 
     LOGD("[mountinfo] replaced mountinfo fd %d with pipe %d", fd, pipefd[0]);
     return pipefd[0];
