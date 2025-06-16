@@ -11,6 +11,7 @@
 #include <sys/uio.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <errno.h>
 
 #include "zygisk.hpp"
 #include "log.h"
