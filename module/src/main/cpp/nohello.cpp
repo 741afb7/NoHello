@@ -301,20 +301,22 @@ public:
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
-	if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
-	{
-		if (!cdev || !cinode)
-		{
-			if (auto info = devinoby("libc.so")) std::tie(cdev, cinode) = *info;
-			else LOGE("Failed to get libc.so dev/inode for mountinfo hook");
-		}
-		if (cdev && cinode) install_mountinfo_hook(api, cdev, cinode);
-	}
         preSpecialize(args);
     }
 
 	void postAppSpecialize(const AppSpecializeArgs *args) override {
 		const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
+		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
+		{
+			auto info = devinobymap("libc.so");
+			if (info)
+			{
+				auto [dev, ino] = *info;
+				LOGD("[zygisk] resolved libc.so via maps: dev=%lu ino=%lu", (unsigned long)dev, (unsigned long)ino);
+				install_mountinfo_hook(api, dev, ino);
+			}
+			else LOGW("[zygisk] failed to find libc.so via devinobymap");
+		}
 		postSpecialize(process);
 		env->ReleaseStringUTFChars(args->nice_name, process);
 	}
