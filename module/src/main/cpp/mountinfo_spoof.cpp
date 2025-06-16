@@ -72,30 +72,25 @@ static void spoof_mountinfo(int fd, const char *raw, size_t len) {
 }
 
 ssize_t my_read(int fd, void *buf, size_t count) {
-    static __thread bool in_hook = false;
-    if (in_hook || !orig_read) return orig_read ? orig_read(fd, buf, count) : -1;
-    in_hook = true;
-    LOGD("[mountinfo] my_read invoked on fd %d", fd);
+    if (!orig_read) return -1;
     int index = find_fd_index(fd);
-    if (index != -1 && fd_data[index]) {
-        size_t remain = fd_len[index] - fd_offset[index];
-        size_t to_copy = (remain > count) ? count : remain;
-        memcpy(buf, fd_data[index] + fd_offset[index], to_copy);
-        fd_offset[index] += to_copy;
-        in_hook = false;
-        return (ssize_t)to_copy;
+    if (index == -1 || !fd_data[index]) {
+        return orig_read(fd, buf, count); 
     }
 
-    ssize_t ret = orig_read(fd, buf, count);
-    in_hook = false;
-    return ret;
+    LOGD("[mountinfo] my_read invoked on spoofed fd %d", fd);
+
+    size_t remain = fd_len[index] - fd_offset[index];
+    size_t to_copy = (remain > count) ? count : remain;
+    memcpy(buf, fd_data[index] + fd_offset[index], to_copy);
+    fd_offset[index] += to_copy;
+    return (ssize_t)to_copy;
 }
 
 int my_open(const char *path, int flags, ...) {
-    static __thread bool in_hook = false;
-    if (in_hook || !orig_open) return orig_open ? orig_open(path, flags) : -1;
-    in_hook = true;
+    if (!orig_open) return -1;
     LOGD("[mountinfo] my_open invoked on path: %s", path);
+
     int fd = orig_open(path, flags);
     if (fd >= 0 && is_mountinfo_path(path)) {
         char tmp[65536] = {0};
@@ -107,7 +102,6 @@ int my_open(const char *path, int flags, ...) {
         }
     }
 
-    in_hook = false;
     return fd;
 }
 
@@ -121,9 +115,9 @@ int my_close(int fd) {
 }
 
 void install_mountinfo_hook(zygisk::Api *api, dev_t dev, ino_t ino) {
-    api->pltHookRegister(dev, ino, "read", (void*)my_read, (void**)&orig_read);
-    api->pltHookRegister(dev, ino, "open", (void*)my_open, (void**)&orig_open);
+    api->pltHookRegister(dev, ino, "read",  (void*)my_read,  (void**)&orig_read);
+    api->pltHookRegister(dev, ino, "open",  (void*)my_open,  (void**)&orig_open);
     api->pltHookRegister(dev, ino, "close", (void*)my_close, (void**)&orig_close);
     api->pltHookCommit();
-    LOGD("[mountinfo] installed hooks and committed them");
+    LOGD("[mountinfo] installed hooks with cache-limited fd filtering");
 }
