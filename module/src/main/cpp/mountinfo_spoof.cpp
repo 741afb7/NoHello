@@ -185,16 +185,59 @@ ssize_t my_readlink(const char *path, char *buf, size_t bufsiz) {
     return orig_readlink ? orig_readlink(path, buf, bufsiz) : -1;
 }
 
+ssize_t my_read(int fd, void *buf, size_t count) {
+    char path[PATH_MAX] = {};
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    char target[PATH_MAX] = {};
+    ssize_t len = readlink(path, target, sizeof(target) - 1);
+    if (len > 0) {
+        target[len] = '\0';
+        if (strstr(target, "mountinfo")) {
+            LOGD("[mountinfo] spoofed via read(fd=%d): %s", fd, target);
+            const char *fake = "0 0 8:1 / / rw,relatime - ext4 /dev/block/vda /dev/root\n";
+            size_t flen = strlen(fake);
+            size_t to_copy = (count < flen) ? count : flen;
+            memcpy(buf, fake, to_copy);
+            return to_copy;
+        }
+    }
+    return orig_read ? orig_read(fd, buf, count) : -1;
+}
+
+ssize_t my_pread(int fd, void *buf, size_t count, off_t offset) {
+    char path[PATH_MAX] = {};
+    snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+    char target[PATH_MAX] = {};
+    ssize_t len = readlink(path, target, sizeof(target) - 1);
+    if (len > 0) {
+        target[len] = '\0';
+        if (strstr(target, "mountinfo")) {
+            LOGD("[mountinfo] spoofed via pread(fd=%d, offset=%ld): %s", fd, offset, target);
+            const char *fake = "0 0 8:1 / / rw,relatime - ext4 /dev/block/vda /dev/root\n";
+            size_t flen = strlen(fake);
+            if ((size_t)offset >= flen) return 0;
+            size_t to_copy = (count < flen - offset) ? count : (flen - offset);
+            memcpy(buf, fake + offset, to_copy);
+            return to_copy;
+        }
+    }
+    return orig_pread ? orig_pread(fd, buf, count, offset) : -1;
+}
+
 void install_mountinfo_hook(Api *api) {
     orig_open     = (int (*)(const char*, int, ...)) dlsym(RTLD_NEXT, "open");
     orig_openat   = (int (*)(int, const char*, int, ...)) dlsym(RTLD_NEXT, "openat");
     orig_fopen    = (FILE *(*)(const char *, const char *)) dlsym(RTLD_NEXT, "fopen");
     orig_readlink = (ssize_t (*)(const char *, char *, size_t)) dlsym(RTLD_NEXT, "readlink");
+    orig_read  = (ssize_t (*)(int, void*, size_t)) dlsym(RTLD_NEXT, "read");
+    orig_pread = (ssize_t (*)(int, void*, size_t, off_t)) dlsym(RTLD_NEXT, "pread");
 
     if (!orig_open)     LOGE("[mountinfo] dlsym failed for open");
     if (!orig_openat)   LOGE("[mountinfo] dlsym failed for openat");
     if (!orig_fopen)    LOGE("[mountinfo] dlsym failed for fopen");
     if (!orig_readlink) LOGE("[mountinfo] dlsym failed for readlink");
+    if (!orig_read)  LOGE("[mountinfo] dlsym failed for read");
+    if (!orig_pread) LOGE("[mountinfo] dlsym failed for pread");
 
-    LOGD("[mountinfo] hook ready: open, openat, fopen, readlink");
+    LOGD("[mountinfo] hook ready: open, openat, fopen, readlink, read, pread");
 }
