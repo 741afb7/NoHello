@@ -94,7 +94,7 @@ static void generate_spoofed_mountinfo(char **data, size_t *length) {
 
 int my_open(const char *path, int flags, ...) {
     LOGD("[mountinfo] my_open intercepted path: %s", path);
-    log_backtrace("my_open");
+    //log_backtrace("my_open");
 
     if (!orig_open)
         return -1;
@@ -131,7 +131,7 @@ int my_open(const char *path, int flags, ...) {
 
 FILE *my_fopen(const char *path, const char *mode) {
     LOGD("[mountinfo] my_fopen intercepted path: %s", path);
-    log_backtrace("my_fopen");
+    //log_backtrace("my_fopen");
 
     if (is_mountinfo_path(path)) {
         int fd = my_open(path, O_RDONLY);
