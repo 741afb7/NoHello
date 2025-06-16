@@ -100,7 +100,8 @@ int my_open(const char *path, int flags, ...) {
     if (fd >= 0 && is_mountinfo_path(path)) {
         char tmp[65536] = {0};
         lseek(fd, 0, SEEK_SET);
-        ssize_t len = read(fd, tmp, sizeof(tmp) - 1);
+        ssize_t len = orig_read ? orig_read(fd, tmp, sizeof(tmp) - 1) : -1;
+        LOGD("[mountinfo] read() in open-hook used orig_read on fd %d -> len %zd", fd, len);
         if (len > 0) {
             spoof_mountinfo(fd, tmp, (size_t)len);
         }
