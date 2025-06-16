@@ -18,6 +18,8 @@ static int (*orig_open)(const char*, int, ...) = nullptr;
 static int (*orig_openat)(int, const char*, int, ...) = nullptr;
 static FILE *(*orig_fopen)(const char *, const char *) = nullptr;
 static ssize_t (*orig_readlink)(const char *, char *, size_t) = nullptr;
+static ssize_t (*orig_read)(int, void*, size_t) = nullptr;
+static ssize_t (*orig_pread)(int, void*, size_t, off_t) = nullptr;
 
 static bool is_mountinfo_path(const char *path) {
     if (!path) return false;
