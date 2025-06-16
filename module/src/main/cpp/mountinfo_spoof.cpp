@@ -75,7 +75,7 @@ ssize_t my_read(int fd, void *buf, size_t count) {
     if (!orig_read) return -1;
     int index = find_fd_index(fd);
     if (index == -1 || !fd_data[index]) {
-        return orig_read(fd, buf, count); 
+        return orig_read(fd, buf, count);
     }
 
     LOGD("[mountinfo] my_read invoked on spoofed fd %d", fd);
@@ -118,6 +118,20 @@ void install_mountinfo_hook(zygisk::Api *api, dev_t dev, ino_t ino) {
     api->pltHookRegister(dev, ino, "read",  (void*)my_read,  (void**)&orig_read);
     api->pltHookRegister(dev, ino, "open",  (void*)my_open,  (void**)&orig_open);
     api->pltHookRegister(dev, ino, "close", (void*)my_close, (void**)&orig_close);
+
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (maps) {
+        char line[512];
+        while (fgets(line, sizeof(line), maps)) {
+            if (strstr(line, "libc.so")) {
+                LOGD("[mountinfo] hooking libc target line: %s", line);
+            }
+        }
+        fclose(maps);
+    } else {
+        LOGW("[mountinfo] failed to read /proc/self/maps");
+    }
+
     api->pltHookCommit();
     LOGD("[mountinfo] installed hooks with cache-limited fd filtering");
 }
