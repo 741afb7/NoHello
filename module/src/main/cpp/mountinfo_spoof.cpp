@@ -94,24 +94,52 @@ long hooked_syscall(long number, ...) {
     va_list args;
     va_start(args, number);
 
+    LOGD("hooked_syscall: syscall number = %ld", number);
+
     if (number == SYS_openat) {
         int dirfd = va_arg(args, int);
         const char *pathname = va_arg(args, const char *);
         int flags = va_arg(args, int);
         mode_t mode = va_arg(args, int);
 
+        LOGD("hooked_syscall: openat path = %s", pathname ? pathname : "null");
+
         if (pathname && strcmp(pathname, "/proc/self/mountinfo") == 0) {
             LOGI("Intercepted openat(\"/proc/self/mountinfo\")");
+
             if (spoof_mountinfo_fd >= 0) {
                 int dupfd = dup(spoof_mountinfo_fd);
+                LOGI("Returning duped memfd: %d", dupfd);
                 va_end(args);
                 return dupfd;
+            } else {
+                LOGE("spoof_mountinfo_fd not valid!");
             }
         }
 
         long ret = syscall(number, dirfd, pathname, flags, mode);
         va_end(args);
         return ret;
+    }
+
+    if (number == SYS_read) {
+        int fd = va_arg(args, int);
+        void *buf = va_arg(args, void *);
+        size_t count = va_arg(args, size_t);
+
+        long res = syscall(number, fd, buf, count);
+
+        if (fd == spoof_mountinfo_fd) {
+            LOGD("Read called on spoofed mountinfo FD (%d), bytes = %ld", fd, res);
+            if (res > 0) {
+                char preview[129] = {0};
+                memcpy(preview, buf, (res > 128 ? 128 : res));
+                LOGD("Read content preview: %.128s", preview);
+            }
+        }
+
+        va_end(args);
+        return res;
     }
 
     long ret;
