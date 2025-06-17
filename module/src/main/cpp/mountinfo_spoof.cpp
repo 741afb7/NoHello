@@ -28,6 +28,8 @@ static ssize_t (*orig_readv)(int, const struct iovec *, int) = nullptr;
 static char *(*orig_fgets)(char *, int, FILE *) = nullptr;
 static size_t (*orig_fread)(void *, size_t, size_t, FILE *) = nullptr;
 
+static char *fake_mountinfo_str = nullptr;
+
 static bool is_mountinfo_path(const char *path) {
     if (!path) return false;
     if (strstr(path, "/mountinfo")) {
