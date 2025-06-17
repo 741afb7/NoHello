@@ -168,7 +168,7 @@ bool install_syscall_hook() {
     return true;
 }
 
-void install_mountinfo_hook(zygisks::Api *api, const char *process_name) {
+void install_mountinfo_hook(zygisk::Api *api, const char *process_name) {
     LOGI("[zygisk] Installing mountinfo spoof hook for: %s", process_name);
 
     if (spoof_mountinfo_fd >= 0) {
