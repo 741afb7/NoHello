@@ -122,6 +122,18 @@ static void perform_memfd_bind_mount_spoof(const char *processName) {
     } else {
         LOGE("[memfd] Failed to bind mount memfd: errno=%d (%s)", errno, strerror(errno));
     }
+    struct stat st_memfd, st_target;
+    if (stat(memfd_path, &st_memfd) == 0) {
+        LOGD("[memfd] Source file mode: %o", st_memfd.st_mode);
+    } else {
+        LOGD("[memfd] Failed to stat memfd_path: %s", strerror(errno));
+    }
+
+    if (stat("/proc/self/mountinfo", &st_target) == 0) {
+        LOGD("[memfd] Target file mode: %o", st_target.st_mode);
+    } else {
+        LOGD("[memfd] Failed to stat /proc/self/mountinfo: %s", strerror(errno));
+    }
 
     close(memfd);
 }
