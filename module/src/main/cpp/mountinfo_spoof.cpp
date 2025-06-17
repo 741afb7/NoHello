@@ -7,6 +7,8 @@
 #include <android/log.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/uio.h>
+#include <limits.h>
 #include <dlfcn.h>
 
 #include "zygisk.hpp"
@@ -18,10 +20,13 @@ static int (*orig_open)(const char*, int, ...) = nullptr;
 static int (*orig_openat)(int, const char*, int, ...) = nullptr;
 static FILE *(*orig_fopen)(const char *, const char *) = nullptr;
 static ssize_t (*orig_readlink)(const char *, char *, size_t) = nullptr;
+static ssize_t (*orig_readlinkat)(int, const char *, char *, size_t) = nullptr;
 static ssize_t (*orig_read)(int, void*, size_t) = nullptr;
 static ssize_t (*orig_pread)(int, void*, size_t, off_t) = nullptr;
 static FILE *(*orig_fopen64)(const char *, const char *) = nullptr;
 static ssize_t (*orig_readv)(int, const struct iovec *, int) = nullptr;
+static char *(*orig_fgets)(char *, int, FILE *) = nullptr;
+static size_t (*orig_fread)(void *, size_t, size_t, FILE *) = nullptr;
 
 static bool is_mountinfo_path(const char *path) {
     if (!path) return false;
@@ -100,10 +105,7 @@ int my_open(const char *path, int flags, ...) {
         return -1;
 
     int fd = orig_open(path, flags);
-    if (fd < 0)
-        return fd;
-
-    if (!is_mountinfo_path(path))
+    if (fd < 0 || !is_mountinfo_path(path))
         return fd;
 
     char *data = nullptr;
@@ -130,10 +132,7 @@ int my_openat(int dirfd, const char *path, int flags, ...) {
         return -1;
 
     int fd = orig_openat(dirfd, path, flags);
-    if (fd < 0)
-        return fd;
-
-    if (!is_mountinfo_path(path))
+    if (fd < 0 || !is_mountinfo_path(path))
         return fd;
 
     char *data = nullptr;
@@ -177,8 +176,14 @@ FILE *my_fopen(const char *path, const char *mode) {
     write(pipefd[1], data, len);
     close(pipefd[1]);
     free(data);
-    fclose(fp);  // close real file
+    fclose(fp);
     return fdopen(pipefd[0], mode);
+}
+
+// fopen64
+FILE *my_fopen64(const char *path, const char *mode) {
+    LOGD("[mountinfo] my_fopen64: path=%s", path);
+    return orig_fopen64 ? my_fopen(path, mode) : nullptr;
 }
 
 // readlink()
@@ -189,6 +194,14 @@ ssize_t my_readlink(const char *path, char *buf, size_t bufsiz) {
     return orig_readlink ? orig_readlink(path, buf, bufsiz) : -1;
 }
 
+ssize_t my_readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    if (strstr(path, "/proc/") && strstr(path, "/fd/")) {
+        LOGD("[mountinfo] readlinkat intercepted: %s", path);
+    }
+    return orig_readlinkat ? orig_readlinkat(dirfd, path, buf, bufsiz) : -1;
+}
+
+// read
 ssize_t my_read(int fd, void *buf, size_t count) {
     char path[PATH_MAX] = {};
     snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
@@ -198,16 +211,16 @@ ssize_t my_read(int fd, void *buf, size_t count) {
         target[len] = '\0';
         if (strstr(target, "mountinfo")) {
             LOGD("[mountinfo] spoofed via read(fd=%d): %s", fd, target);
-            const char *fake = "0 0 8:1 / / rw,relatime - ext4 /dev/block/vda /dev/root\n";
-            size_t flen = strlen(fake);
+            size_t flen = strlen(fake_mountinfo_str);
             size_t to_copy = (count < flen) ? count : flen;
-            memcpy(buf, fake, to_copy);
+            memcpy(buf, fake_mountinfo_str, to_copy);
             return to_copy;
         }
     }
     return orig_read ? orig_read(fd, buf, count) : -1;
 }
 
+// pread
 ssize_t my_pread(int fd, void *buf, size_t count, off_t offset) {
     char path[PATH_MAX] = {};
     snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
@@ -217,22 +230,17 @@ ssize_t my_pread(int fd, void *buf, size_t count, off_t offset) {
         target[len] = '\0';
         if (strstr(target, "mountinfo")) {
             LOGD("[mountinfo] spoofed via pread(fd=%d, offset=%ld): %s", fd, offset, target);
-            const char *fake = "0 0 8:1 / / rw,relatime - ext4 /dev/block/vda /dev/root\n";
-            size_t flen = strlen(fake);
+            size_t flen = strlen(fake_mountinfo_str);
             if ((size_t)offset >= flen) return 0;
             size_t to_copy = (count < flen - offset) ? count : (flen - offset);
-            memcpy(buf, fake + offset, to_copy);
+            memcpy(buf, fake_mountinfo_str + offset, to_copy);
             return to_copy;
         }
     }
     return orig_pread ? orig_pread(fd, buf, count, offset) : -1;
 }
 
-FILE *my_fopen64(const char *path, const char *mode) {
-    LOGD("[mountinfo] my_fopen64: path=%s", path);
-    return orig_fopen64 ? orig_fopen64(path, mode) : nullptr;
-}
-
+// readv
 ssize_t my_readv(int fd, const struct iovec *iov, int iovcnt) {
     char linkpath[PATH_MAX] = {};
     snprintf(linkpath, sizeof(linkpath), "/proc/self/fd/%d", fd);
@@ -247,24 +255,46 @@ ssize_t my_readv(int fd, const struct iovec *iov, int iovcnt) {
     return orig_readv ? orig_readv(fd, iov, iovcnt) : -1;
 }
 
+// fgets()
+char *my_fgets(char *s, int size, FILE *stream) {
+    if (!orig_fgets)
+        return nullptr;
+
+    long pos = ftell(stream);
+    char *ret = orig_fgets(s, size, stream);
+    if (pos == 0 && ret && strstr(s, "mountinfo")) {
+        strncpy(s, fake_mountinfo_str, size - 1);
+        s[size - 1] = '\0';
+    }
+    return ret;
+}
+
+// fread()
+size_t my_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    if (!orig_fread)
+        return 0;
+
+    long pos = ftell(stream);
+    size_t ret = orig_fread(ptr, size, nmemb, stream);
+
+    if (pos == 0 && strstr((char *)ptr, "mountinfo")) {
+        strncpy((char *)ptr, fake_mountinfo_str, size * nmemb);
+    }
+    return ret;
+}
 
 void install_mountinfo_hook(Api *api) {
     orig_open     = (int (*)(const char*, int, ...)) dlsym(RTLD_NEXT, "open");
     orig_openat   = (int (*)(int, const char*, int, ...)) dlsym(RTLD_NEXT, "openat");
     orig_fopen    = (FILE *(*)(const char *, const char *)) dlsym(RTLD_NEXT, "fopen");
+    orig_fopen64  = (FILE *(*)(const char *, const char *)) dlsym(RTLD_NEXT, "fopen64");
     orig_readlink = (ssize_t (*)(const char *, char *, size_t)) dlsym(RTLD_NEXT, "readlink");
-    orig_read  = (ssize_t (*)(int, void*, size_t)) dlsym(RTLD_NEXT, "read");
-    orig_pread = (ssize_t (*)(int, void*, size_t, off_t)) dlsym(RTLD_NEXT, "pread");
-    orig_fopen64 = (FILE *(*)(const char *, const char *)) dlsym(RTLD_NEXT, "fopen64");
-    orig_readv   = (ssize_t (*)(int, const struct iovec *, int)) dlsym(RTLD_NEXT, "readv");
+    orig_readlinkat = (ssize_t (*)(int, const char *, char *, size_t)) dlsym(RTLD_NEXT, "readlinkat");
+    orig_read     = (ssize_t (*)(int, void*, size_t)) dlsym(RTLD_NEXT, "read");
+    orig_pread    = (ssize_t (*)(int, void*, size_t, off_t)) dlsym(RTLD_NEXT, "pread");
+    orig_readv    = (ssize_t (*)(int, const struct iovec *, int)) dlsym(RTLD_NEXT, "readv");
+    orig_fgets    = (char *(*)(char *, int, FILE *)) dlsym(RTLD_NEXT, "fgets");
+    orig_fread    = (size_t (*)(void *, size_t, size_t, FILE *)) dlsym(RTLD_NEXT, "fread");
 
-    if (!orig_open)     LOGE("[mountinfo] dlsym failed for open");
-    if (!orig_openat)   LOGE("[mountinfo] dlsym failed for openat");
-    if (!orig_fopen)    LOGE("[mountinfo] dlsym failed for fopen");
-    if (!orig_readlink) LOGE("[mountinfo] dlsym failed for readlink");
-    if (!orig_read)  LOGE("[mountinfo] dlsym failed for read");
-    if (!orig_pread) LOGE("[mountinfo] dlsym failed for pread");
-
-    LOGD("[mountinfo] hook ready: open, openat, fopen, readlink, read, pread");
-    LOGD("[mountinfo] hook ready: fopen64, readv");
+    LOGD("[mountinfo] hook installed: open/openat/fopen/fread/fgets/readlink/read/pread/readv");
 }
