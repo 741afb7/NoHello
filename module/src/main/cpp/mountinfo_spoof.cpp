@@ -10,6 +10,14 @@
 #include <sys/types.h>
 #include <unordered_map>
 #include <string>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <stdint.h>
+#include <utility> 
+#include <dlfcn.h>
 
 #define LOG_TAG "NoHello"
 #include "log.h"
