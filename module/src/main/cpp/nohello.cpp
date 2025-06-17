@@ -308,14 +308,10 @@ public:
 		const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
 		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
 		{
-			auto info = devinobymap("libc.so");
-			if (info.first && info.second)
-			{
-				LOGD("[zygisk] resolved libc.so via maps: dev=%lu ino=%lu", (unsigned long)info.first, (unsigned long)info.second);
-				install_mountinfo_hook(api, process);
-			}
-			else LOGW("[zygisk] failed to find valid dev/inode for libc.so");
+			LOGI("[zygisk] DenyList process detected: %s", process);
+			install_mountinfo_hook(api, process);
 		}
+		else LOGD("[zygisk] Process not on denylist: %s", process);
 		postSpecialize(process);
 		env->ReleaseStringUTFChars(args->nice_name, process);
 	}
