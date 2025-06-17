@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <dlfcn.h>
 #include <android/log.h>
 #include <sys/mount.h>
 #include <sys/syscall.h>
@@ -60,7 +61,6 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
                 if (!shared_map.count(original)) {
                     shared_map[original] = fake_id++;
                 }
-                LOGD("[memfd] Replacing %s -> shared:%d", tokens[i], shared_map[original]);
                 snprintf(tokens[i], strlen(tokens[i]) + 1, "shared:%d", shared_map[original]);
             }
         }
@@ -72,20 +72,48 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
 
     free(line);
     fclose(f);
-
-    LOGI("[memfd] Generated spoofed mountinfo total size: %zu bytes", total);
-
     *out_data = result;
     *out_len = total;
+    LOGI("[memfd] Generated spoofed mountinfo total size: %zu bytes", total);
     return true;
+}
+
+void print_maps() {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) {
+        LOGE("Failed to open /proc/self/maps");
+        return;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), maps)) {
+        if (strstr(line, "libc.so")) {
+            LOGD("[maps] %s", line);
+        }
+    }
+    fclose(maps);
 }
 
 static void perform_memfd_bind_mount_spoof(const char *processName) {
     LOGI("[memfd] Performing in-memory spoof for process: %s", processName);
 
-    if (geteuid() != 0) {
-        LOGW("[memfd] Warning: current process is not root (uid=%d), mount may fail", geteuid());
+    print_maps(); 
+
+    void* libc_handle = dlopen("libc.so", RTLD_NOW);
+    if (!libc_handle) {
+        LOGE("[memfd] Failed to dlopen libc.so: %s", dlerror());
+        return;
     }
+    LOGD("[memfd] libc.so handle = %p", libc_handle);
+
+    void* openat_sym = dlsym(libc_handle, "openat");
+    if (!openat_sym) {
+        LOGE("[memfd] Failed to find openat: %s", dlerror());
+    } else {
+        LOGD("[memfd] openat addr = %p", openat_sym);
+    }
+
+    dlclose(libc_handle);
 
     char *data = nullptr;
     size_t datalen = 0;
@@ -95,51 +123,41 @@ static void perform_memfd_bind_mount_spoof(const char *processName) {
         return;
     }
 
-    LOGI("[memfd] Generated spoofed mountinfo total size: %zu bytes", datalen);
-
     int memfd = memfd_create("mountinfo_memfd", 0);
     if (memfd < 0) {
-        LOGE("[memfd] memfd_create failed: errno=%d (%s)", errno, strerror(errno));
+        LOGE("[memfd] memfd_create failed: %s", strerror(errno));
         free(data);
         return;
     }
-
     LOGD("[memfd] memfd_create successful: fd=%d", memfd);
 
-    ssize_t written = write(memfd, data, datalen);
-    if (written != (ssize_t)datalen) {
-        LOGE("[memfd] write to memfd failed: expected=%zu, written=%zd, errno=%d (%s)", datalen, written, errno, strerror(errno));
+    if (write(memfd, data, datalen) != (ssize_t)datalen) {
+        LOGE("[memfd] write to memfd failed");
         close(memfd);
         free(data);
         return;
     }
 
-    LOGI("[memfd] Written %zd bytes to memfd", written);
+    LOGI("[memfd] Written %zu bytes to memfd", datalen);
     free(data);
 
     char memfd_path[64];
     snprintf(memfd_path, sizeof(memfd_path), "/proc/self/fd/%d", memfd);
     LOGD("[memfd] memfd path: %s", memfd_path);
+
     struct stat st_memfd, st_target;
     if (stat(memfd_path, &st_memfd) == 0) {
         LOGD("[memfd] Source file exists, mode: %o", st_memfd.st_mode);
-    } else {
-        LOGW("[memfd] Failed to stat memfd_path: %s", strerror(errno));
     }
-
     if (stat("/proc/self/mountinfo", &st_target) == 0) {
         LOGD("[memfd] Target file exists, mode: %o", st_target.st_mode);
-    } else {
-        LOGW("[memfd] Failed to stat /proc/self/mountinfo: %s", strerror(errno));
     }
-
-    LOGD("[memfd] Attempting to bind mount memfd to /proc/self/mountinfo");
 
     int res = mount(memfd_path, "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
     if (res == 0) {
         LOGI("[memfd] Successfully bind-mounted memfd -> /proc/self/mountinfo");
     } else {
-        LOGE("[memfd] Failed to bind mount memfd to /proc/self/mountinfo: errno=%d (%s)", errno, strerror(errno));
+        LOGE("[memfd] Failed to bind mount memfd: %s", strerror(errno));
     }
 
     close(memfd);
