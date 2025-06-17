@@ -2,7 +2,6 @@
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/mount.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -14,8 +13,6 @@
 #include <dlfcn.h>
 #include <android/log.h>
 #include <utility> 
-#include <unordered_map>
-#include <string>
 
 #include "zygisk.hpp"
 #include "log.h"
@@ -29,59 +26,6 @@ static bool is_system_libc(const char *path) {
 static bool is_libc_path(const char* path) {
     if (!path) return false;
     return (strstr(path, "libc.so") && !strstr(path, "linker"));
-}
-
-std::pair<dev_t, ino_t> devinobymap(const char *libname_hint_unused) {
-    FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp) {
-        LOGD("Failed to open /proc/self/maps");
-        return {0, 0};
-    }
-
-    char line[512];
-    while (fgets(line, sizeof(line), fp)) {
-        char path[256] = {};
-        if (sscanf(line, "%*x-%*x %*s %*s %*s %*d %255s", path) == 1) {
-            if (is_libc_path(path)) {
-                struct stat st{};
-                if (stat(path, &st) == 0) {
-                    LOGD("Matched libc.so: %s -> dev=%lu ino=%lu", path, (unsigned long)st.st_dev, (unsigned long)st.st_ino);
-                    fclose(fp);
-                    return {st.st_dev, st.st_ino};
-                } else {
-                    LOGD("stat failed for matched libc.so path: %s", path);
-                }
-            }
-        }
-    }
-
-    fclose(fp);
-    LOGD("No matching libc.so found in /proc/self/maps");
-    return {0, 0};
-}
-
-static long hooked_syscall(long number, ...) {
-    va_list args;
-    va_start(args, number);
-
-    if (number == __NR_openat) {
-        int dirfd = va_arg(args, int);
-        const char *pathname = va_arg(args, const char *);
-        int flags = va_arg(args, int);
-
-        if (pathname && strcmp(pathname, "/proc/self/mountinfo") == 0) {
-            LOGI("[hook] intercepted openat on /proc/self/mountinfo, returning fake FD");
-            errno = ENOENT;
-            return -1;
-        }
-
-        va_end(args);
-        va_start(args, number);
-    }
-
-    long ret = orig_syscall(number, args);
-    va_end(args);
-    return ret;
 }
 
 bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
@@ -101,7 +45,7 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
         return false;
     }
 
-    int fake_id = 1000; 
+    int fake_id = 1000;
     std::unordered_map<std::string, int> shared_map;
     std::unordered_map<std::string, int> master_map;
 
@@ -118,7 +62,6 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
         }
 
         for (int i = 6; i < tok_idx; ++i) {
-            // 处理 shared:<ID>
             if (strstr(tokens[i], "shared:")) {
                 std::string original = tokens[i];
                 if (!shared_map.count(original)) {
@@ -167,12 +110,14 @@ void install_mountinfo_hook(zygisk::Api *api, const char *process_name) {
         free(data);
         return;
     }
+
     if (write(memfd, data, data_len) != (ssize_t)data_len) {
         LOGE("[zygisk] Failed to write spoofed mountinfo to memfd");
         close(memfd);
         free(data);
         return;
     }
+
     lseek(memfd, 0, SEEK_SET);
 
     free(data);
