@@ -81,63 +81,108 @@ static long hooked_syscall(long number, ...) {
     return ret;
 }
 
-void install_mountinfo_hook(zygisk::Api *api, const char *process_name) {
-    auto [target_dev, target_ino] = devinobymap("libc.so");
-    if (!target_dev || !target_ino) {
-        LOGW("Unable to resolve valid dev/inode for libc.so in app process.");
-        return;
+bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
+    FILE *f = fopen("/proc/self/mountinfo", "r");
+    if (!f) {
+        LOGE("Failed to open mountinfo: %s", strerror(errno));
+        return false;
     }
 
-    LOGD("Resolved libc.so in app process: dev=%lu ino=%lu", (unsigned long)target_dev, (unsigned long)target_ino);
-
-    DIR *dir = opendir("/proc/self/map_files");
-    if (!dir) {
-        LOGE("Failed to open /proc/self/map_files");
-        return;
+    char *line = nullptr;
+    size_t len = 0;
+    size_t total = 0;
+    char *result = (char *)malloc(65536);
+    if (!result) {
+        fclose(f);
+        LOGE("Memory allocation failed");
+        return false;
     }
 
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        if (entry->d_type != DT_LNK) continue;
+    int fake_id = 1000; 
+    std::unordered_map<std::string, int> shared_map;
+    std::unordered_map<std::string, int> master_map;
 
-        char fullpath[512];
-        snprintf(fullpath, sizeof(fullpath), "/proc/self/map_files/%s", entry->d_name);
+    while (getline(&line, &len, f) != -1) {
+        LOGD("[mountinfo] Original: %s", line);
 
-        char linkpath[512];
-        ssize_t len = readlink(fullpath, linkpath, sizeof(linkpath) - 1);
-        if (len <= 0) continue;
-        linkpath[len] = '\0';
+        char *tokens[64];
+        int tok_idx = 0;
+        char *saveptr = nullptr;
+        char *token = strtok_r(line, " ", &saveptr);
+        while (token && tok_idx < 64) {
+            tokens[tok_idx++] = token;
+            token = strtok_r(nullptr, " ", &saveptr);
+        }
 
-        struct stat st;
-        if (stat(linkpath, &st) != 0) continue;
-
-        if (st.st_dev == target_dev && st.st_ino == target_ino) {
-            LOGD("Identified target libc.so map: %s", fullpath);
-
-            unsigned long start_addr;
-            if (sscanf(entry->d_name, "%lx-", &start_addr) != 1) continue;
-
-            void *addr = (void *)start_addr;
-            if (mprotect(addr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-                LOGE("mprotect failed: %s", strerror(errno));
-                continue;
+        for (int i = 6; i < tok_idx; ++i) {
+            // 处理 shared:<ID>
+            if (strstr(tokens[i], "shared:")) {
+                std::string original = tokens[i];
+                if (!shared_map.count(original)) {
+                    shared_map[original] = fake_id++;
+                }
+                snprintf(tokens[i], strlen(tokens[i]) + 1, "shared:%d", shared_map[original]);
             }
 
-            orig_syscall = (long (*)(long, ...))addr;
+            if (strstr(tokens[i], "master:")) {
+                std::string original = tokens[i];
+                if (!master_map.count(original)) {
+                    master_map[original] = fake_id++;
+                }
+                snprintf(tokens[i], strlen(tokens[i]) + 1, "master:%d", master_map[original]);
+            }
+        }
 
-            uint8_t jump_code[] = {
-                0x48, 0xB8,                          // mov rax, <addr>
-                0, 0, 0, 0, 0, 0, 0, 0,              // <hook addr>
-                0xFF, 0xE0                           // jmp rax
-            };
-            void *hook_fn = (void *)hooked_syscall;
-            memcpy(jump_code + 2, &hook_fn, sizeof(void *));
-            memcpy(addr, jump_code, sizeof(jump_code));
-
-            LOGI("Successfully hooked syscall at %p", addr);
-            break;
+        for (int i = 0; i < tok_idx; ++i) {
+            total += snprintf(result + total, 65536 - total, "%s%s", tokens[i], (i + 1 == tok_idx) ? "\n" : " ");
         }
     }
 
-    closedir(dir);
+    free(line);
+    fclose(f);
+
+    *out_data = result;
+    *out_len = total;
+
+    LOGI("Generated spoofed mountinfo total size: %zu bytes", total);
+    return true;
+}
+
+void install_mountinfo_hook(zygisk::Api *api, const char *process_name) {
+    LOGI("[zygisk] Installing hook for process: %s", process_name);
+
+    char *data = nullptr;
+    size_t data_len = 0;
+    if (!generate_spoofed_mountinfo_content(&data, &data_len)) {
+        LOGE("[zygisk] Failed to generate spoofed mountinfo");
+        return;
+    }
+
+    int memfd = syscall(SYS_memfd_create, "mountinfo_memfd", MFD_CLOEXEC);
+    if (memfd < 0) {
+        LOGE("[zygisk] memfd_create failed: %s", strerror(errno));
+        free(data);
+        return;
+    }
+    if (write(memfd, data, data_len) != (ssize_t)data_len) {
+        LOGE("[zygisk] Failed to write spoofed mountinfo to memfd");
+        close(memfd);
+        free(data);
+        return;
+    }
+    lseek(memfd, 0, SEEK_SET);
+
+    free(data);
+
+    char memfd_path[64];
+    snprintf(memfd_path, sizeof(memfd_path), "/proc/self/fd/%d", memfd);
+    int res = mount(memfd_path, "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
+
+    if (res == 0) {
+        LOGI("[zygisk] Successfully bind-mounted memfd -> /proc/self/mountinfo");
+    } else {
+        LOGE("[zygisk] Failed to bind mount memfd to /proc/self/mountinfo: %s", strerror(errno));
+    }
+
+    close(memfd);
 }
