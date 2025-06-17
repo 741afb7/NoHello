@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -13,6 +14,8 @@
 #include <dlfcn.h>
 #include <android/log.h>
 #include <utility> 
+#include <unordered_map>
+#include <string>
 
 #include "zygisk.hpp"
 #include "log.h"
