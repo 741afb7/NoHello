@@ -42,6 +42,7 @@ static bool is_mountinfo_path(const char *path) {
 
 // generate mountinfo
 static void generate_spoofed_mountinfo(char **data, size_t *length) {
+    LOGD("Generating mountinfo...");
     FILE *f = fopen("/proc/self/mountinfo", "r");
     if (!f) return;
 
@@ -113,6 +114,7 @@ static void generate_spoofed_mountinfo(char **data, size_t *length) {
 
 // open()
 int my_open(const char *path, int flags, ...) {
+    LOGD("[mountinfo] hit hook: my_open");
     if (!orig_open)
         return -1;
 
@@ -140,6 +142,7 @@ int my_open(const char *path, int flags, ...) {
 
 // openat()
 int my_openat(int dirfd, const char *path, int flags, ...) {
+    LOGD("[mountinfo] hit hook: my_openat");
     if (!orig_openat)
         return -1;
 
@@ -167,6 +170,7 @@ int my_openat(int dirfd, const char *path, int flags, ...) {
 
 // fopen()
 FILE *my_fopen(const char *path, const char *mode) {
+    LOGD("[mountinfo] hit hook: my_fopen");
     if (!orig_fopen)
         return nullptr;
 
@@ -194,12 +198,14 @@ FILE *my_fopen(const char *path, const char *mode) {
 
 // fopen64
 FILE *my_fopen64(const char *path, const char *mode) {
+    LOGD("[mountinfo] hit hook: my_fopen64");
     LOGD("[mountinfo] my_fopen64: path=%s", path);
     return orig_fopen64 ? my_fopen(path, mode) : nullptr;
 }
 
 // readlink()
 ssize_t my_readlink(const char *path, char *buf, size_t bufsiz) {
+    LOGD("[mountinfo] hit hook: my_readlink");
     if (strstr(path, "/proc/") && strstr(path, "/fd/")) {
         LOGD("[mountinfo] readlink intercepted: %s", path);
     }
@@ -207,6 +213,7 @@ ssize_t my_readlink(const char *path, char *buf, size_t bufsiz) {
 }
 
 ssize_t my_readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
+    LOGD("[mountinfo] hit hook: my_readlinkat");
     if (strstr(path, "/proc/") && strstr(path, "/fd/")) {
         LOGD("[mountinfo] readlinkat intercepted: %s", path);
     }
@@ -215,6 +222,7 @@ ssize_t my_readlinkat(int dirfd, const char *path, char *buf, size_t bufsiz) {
 
 // read
 ssize_t my_read(int fd, void *buf, size_t count) {
+    LOGD("[mountinfo] hit hook: my_read2");
     char path[PATH_MAX] = {};
     snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
     char target[PATH_MAX] = {};
@@ -234,6 +242,7 @@ ssize_t my_read(int fd, void *buf, size_t count) {
 
 // pread
 ssize_t my_pread(int fd, void *buf, size_t count, off_t offset) {
+    LOGD("[mountinfo] hit hook: my_pread");
     char path[PATH_MAX] = {};
     snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
     char target[PATH_MAX] = {};
@@ -254,6 +263,7 @@ ssize_t my_pread(int fd, void *buf, size_t count, off_t offset) {
 
 // readv
 ssize_t my_readv(int fd, const struct iovec *iov, int iovcnt) {
+    LOGD("[mountinfo] hit hook: my_readv");
     char linkpath[PATH_MAX] = {};
     snprintf(linkpath, sizeof(linkpath), "/proc/self/fd/%d", fd);
     char target[PATH_MAX] = {};
@@ -269,6 +279,7 @@ ssize_t my_readv(int fd, const struct iovec *iov, int iovcnt) {
 
 // fgets()
 char *my_fgets(char *s, int size, FILE *stream) {
+    LOGD("[mountinfo] hit hook: my_fgets");
     if (!orig_fgets)
         return nullptr;
 
@@ -283,6 +294,7 @@ char *my_fgets(char *s, int size, FILE *stream) {
 
 // fread()
 size_t my_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    LOGD("[mountinfo] hit hook: my_fread");
     if (!orig_fread)
         return 0;
 
