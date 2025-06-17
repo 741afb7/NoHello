@@ -11,7 +11,7 @@
 #include <pthread.h>
 #include <sys/mman.h>
 
-#include "zygisk.h"
+#include "zygisk.hpp"
 #include "log.h"
 
 #define LOG_TAG "NoHello"
