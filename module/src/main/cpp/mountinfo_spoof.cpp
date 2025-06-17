@@ -12,15 +12,10 @@
 #include <errno.h>
 #include <dlfcn.h>
 #include <android/log.h>
+#include <utility> 
 
 #include "zygisk.hpp"
 #include "log.h"
-
-#define LOG_TAG "NoHello"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 static long (*orig_syscall)(long, ...) = nullptr;
 
@@ -30,7 +25,7 @@ static bool is_system_libc(const char *path) {
 
 std::pair<dev_t, ino_t> devinobymap(const char *libname) {
     FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp) return {0, 0};
+    if (!fp) return std::make_pair(0, 0);
 
     char line[512];
     while (fgets(line, sizeof(line), fp)) {
