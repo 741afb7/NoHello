@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <unordered_map>
 #include <string>
+#include <sys/stat.h>
 
 #include "zygisk.hpp"
 #include "log.h"
