@@ -42,6 +42,8 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
     std::unordered_map<std::string, int> shared_map;
 
     while (getline(&line, &len, f) != -1) {
+        LOGD("[memfd] Original line: %s", line);
+
         char *tokens[64];
         int tok_idx = 0;
         char *saveptr = nullptr;
@@ -57,6 +59,7 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
                 if (!shared_map.count(original)) {
                     shared_map[original] = fake_id++;
                 }
+                LOGD("[memfd] Replacing %s -> shared:%d", tokens[i], shared_map[original]);
                 snprintf(tokens[i], strlen(tokens[i]) + 1, "shared:%d", shared_map[original]);
             }
         }
@@ -68,6 +71,9 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
 
     free(line);
     fclose(f);
+
+    LOGI("[memfd] Generated spoofed mountinfo total size: %zu bytes", total);
+
     *out_data = result;
     *out_len = total;
     return true;
@@ -91,24 +97,30 @@ static void perform_memfd_bind_mount_spoof(const char *processName) {
         return;
     }
 
-    if (write(memfd, data, datalen) != (ssize_t)datalen) {
-        LOGE("[memfd] write to memfd failed");
+    LOGD("[memfd] memfd_create successful: fd=%d", memfd);
+
+    ssize_t written = write(memfd, data, datalen);
+    if (written != (ssize_t)datalen) {
+        LOGE("[memfd] write to memfd failed: expected=%zu, written=%zd, errno=%d (%s)",
+             datalen, written, errno, strerror(errno));
         close(memfd);
         free(data);
         return;
     }
 
+    LOGI("[memfd] Written %zd bytes to memfd", written);
     free(data);
 
-    int res = mount("/proc/self/fd/%d", "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
     char memfd_path[64];
     snprintf(memfd_path, sizeof(memfd_path), "/proc/self/fd/%d", memfd);
+    LOGD("[memfd] memfd path: %s", memfd_path);
 
-    res = mount(memfd_path, "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
+    LOGD("[memfd] Attempting to bind mount memfd to /proc/self/mountinfo");
+    int res = mount(memfd_path, "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
     if (res == 0) {
         LOGI("[memfd] Successfully bind-mounted memfd -> /proc/self/mountinfo");
     } else {
-        LOGE("[memfd] Failed to bind mount memfd: %s", strerror(errno));
+        LOGE("[memfd] Failed to bind mount memfd: errno=%d (%s)", errno, strerror(errno));
     }
 
     close(memfd);
