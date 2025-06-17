@@ -97,6 +97,16 @@ static void generate_spoofed_mountinfo(char **data, size_t *length) {
     fclose(f);
     *data = result;
     *length = total;
+
+    if (fake_mountinfo_str) {
+        free(fake_mountinfo_str);
+    }
+    fake_mountinfo_str = (char *)malloc(total + 1);
+    if (fake_mountinfo_str) {
+        memcpy(fake_mountinfo_str, result, total);
+        fake_mountinfo_str[total] = '\0';  // Null-terminate the string
+    }
+    free(result);
 }
 
 // open()
