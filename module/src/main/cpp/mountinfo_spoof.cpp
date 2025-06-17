@@ -1,32 +1,22 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <string.h>
-#include <sys/mman.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <errno.h>
+#include <android/log.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <dirent.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <errno.h>
-#include <dlfcn.h>
-#include <android/log.h>
-#include <utility> 
+#include <unordered_map>
+#include <string>
 
-#include "zygisk.hpp"
+#define LOG_TAG "NoHello"
 #include "log.h"
+#include "zygisk.hpp"
 
-static long (*orig_syscall)(long, ...) = nullptr;
-
-static bool is_system_libc(const char *path) {
-    return strstr(path, "/system/") || strstr(path, "/apex/");
-}
-
-static bool is_libc_path(const char* path) {
-    if (!path) return false;
-    return (strstr(path, "libc.so") && !strstr(path, "linker"));
-}
+static int spoof_mountinfo_fd = -1;
+static long (*original_syscall)(long, ...) = nullptr;
 
 bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
     FILE *f = fopen("/proc/self/mountinfo", "r");
@@ -50,8 +40,6 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
     std::unordered_map<std::string, int> master_map;
 
     while (getline(&line, &len, f) != -1) {
-        LOGD("[mountinfo] Original: %s", line);
-
         char *tokens[64];
         int tok_idx = 0;
         char *saveptr = nullptr;
@@ -94,43 +82,115 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
     return true;
 }
 
-void install_mountinfo_hook(zygisk::Api *api, const char *process_name) {
-    LOGI("[zygisk] Installing hook for process: %s", process_name);
+long hooked_syscall(long number, ...) {
+    va_list args;
+    va_start(args, number);
+
+    if (number == SYS_openat) {
+        int dirfd = va_arg(args, int);
+        const char *pathname = va_arg(args, const char *);
+        int flags = va_arg(args, int);
+        mode_t mode = va_arg(args, int);
+
+        if (pathname && strcmp(pathname, "/proc/self/mountinfo") == 0) {
+            LOGI("Intercepted openat(\"/proc/self/mountinfo\")");
+            if (spoof_mountinfo_fd >= 0) {
+                int dupfd = dup(spoof_mountinfo_fd);
+                va_end(args);
+                return dupfd;
+            }
+        }
+
+        long ret = syscall(number, dirfd, pathname, flags, mode);
+        va_end(args);
+        return ret;
+    }
+
+    long ret;
+    if (original_syscall) {
+        long arg1 = va_arg(args, long);
+        long arg2 = va_arg(args, long);
+        long arg3 = va_arg(args, long);
+        long arg4 = va_arg(args, long);
+        long arg5 = va_arg(args, long);
+        long arg6 = va_arg(args, long);
+        ret = original_syscall(number, arg1, arg2, arg3, arg4, arg5, arg6);
+    } else {
+        ret = syscall(number);
+    }
+
+    va_end(args);
+    return ret;
+}
+
+bool install_syscall_hook() {
+    void *handle = dlopen("libc.so", RTLD_NOW);
+    if (!handle) {
+        LOGE("dlopen libc.so failed");
+        return false;
+    }
+
+    void *syscall_addr = dlsym(handle, "syscall");
+    dlclose(handle);
+
+    if (!syscall_addr) {
+        LOGE("dlsym syscall failed");
+        return false;
+    }
+
+    original_syscall = (long (*)(long, ...))malloc(16);
+    memcpy(original_syscall, syscall_addr, 16);
+
+    uintptr_t page_start = (uintptr_t)syscall_addr & ~(getpagesize() - 1);
+    if (mprotect((void *)page_start, getpagesize(), PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        LOGE("mprotect failed");
+        return false;
+    }
+
+    uint32_t stub[] = {
+        0x58000050,  // ldr x16, #8
+        0xd61f0200,  // br x16
+    };
+    void *hook_func = (void *)hooked_syscall;
+    memcpy(syscall_addr, stub, sizeof(stub));
+    memcpy((char *)syscall_addr + sizeof(stub), &hook_func, sizeof(void *));
+    __builtin___clear_cache((char *)syscall_addr, (char *)syscall_addr + 32);
+
+    LOGI("syscall hook installed");
+    return true;
+}
+
+void install_mountinfo_hook(zygisks::Api *api, const char *process_name) {
+    LOGI("[zygisk] Installing mountinfo spoof hook for: %s", process_name);
+
+    if (spoof_mountinfo_fd >= 0) {
+        close(spoof_mountinfo_fd);
+        spoof_mountinfo_fd = -1;
+    }
 
     char *data = nullptr;
-    size_t data_len = 0;
-    if (!generate_spoofed_mountinfo_content(&data, &data_len)) {
-        LOGE("[zygisk] Failed to generate spoofed mountinfo");
+    size_t len = 0;
+    if (!generate_spoofed_mountinfo_content(&data, &len)) {
         return;
     }
 
-    int memfd = syscall(SYS_memfd_create, "mountinfo_memfd", MFD_CLOEXEC);
-    if (memfd < 0) {
-        LOGE("[zygisk] memfd_create failed: %s", strerror(errno));
+    spoof_mountinfo_fd = syscall(SYS_memfd_create, "mountinfo_memfd", MFD_CLOEXEC);
+    if (spoof_mountinfo_fd < 0) {
+        LOGE("memfd_create failed: %s", strerror(errno));
         free(data);
         return;
     }
 
-    if (write(memfd, data, data_len) != (ssize_t)data_len) {
-        LOGE("[zygisk] Failed to write spoofed mountinfo to memfd");
-        close(memfd);
+    if (write(spoof_mountinfo_fd, data, len) != (ssize_t)len) {
+        LOGE("write memfd failed");
+        close(spoof_mountinfo_fd);
+        spoof_mountinfo_fd = -1;
         free(data);
         return;
     }
 
-    lseek(memfd, 0, SEEK_SET);
-
+    lseek(spoof_mountinfo_fd, 0, SEEK_SET);
     free(data);
 
-    char memfd_path[64];
-    snprintf(memfd_path, sizeof(memfd_path), "/proc/self/fd/%d", memfd);
-    int res = mount(memfd_path, "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
-
-    if (res == 0) {
-        LOGI("[zygisk] Successfully bind-mounted memfd -> /proc/self/mountinfo");
-    } else {
-        LOGE("[zygisk] Failed to bind mount memfd to /proc/self/mountinfo: %s", strerror(errno));
-    }
-
-    close(memfd);
+    install_syscall_hook();
 }
