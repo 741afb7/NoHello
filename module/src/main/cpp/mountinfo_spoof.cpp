@@ -146,8 +146,10 @@ bool install_syscall_hook() {
         return false;
     }
 
-    original_syscall = (long (*)(long, ...))malloc(16);
-    memcpy(original_syscall, syscall_addr, 16);
+    void *trampoline = malloc(32);
+    memcpy(trampoline, syscall_addr, 16);
+    __builtin___clear_cache((char *)trampoline, (char *)trampoline + 32);
+    original_syscall = (long (*)(long, ...))trampoline;
 
     uintptr_t page_start = (uintptr_t)syscall_addr & ~(getpagesize() - 1);
     if (mprotect((void *)page_start, getpagesize(), PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
