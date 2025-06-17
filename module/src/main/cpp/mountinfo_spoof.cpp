@@ -23,27 +23,37 @@ static bool is_system_libc(const char *path) {
     return strstr(path, "/system/") || strstr(path, "/apex/");
 }
 
-std::pair<dev_t, ino_t> devinobymap(const char *libname) {
+static bool is_libc_path(const char* path) {
+    if (!path) return false;
+    return (strstr(path, "libc.so") && !strstr(path, "linker"));
+}
+
+std::pair<dev_t, ino_t> devinobymap(const char *libname_hint_unused) {
     FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp) return std::make_pair(0, 0);
+    if (!fp) {
+        LOGD("Failed to open /proc/self/maps");
+        return {0, 0};
+    }
 
     char line[512];
     while (fgets(line, sizeof(line), fp)) {
-        if (!strstr(line, libname)) continue;
-
-        char path[256];
-        unsigned long start;
-        if (sscanf(line, "%lx-%*lx %*s %*s %*s %*s %255s", &start, path) == 2) {
-            if (is_system_libc(path)) continue;
-
-            struct stat st;
-            if (stat(path, &st) == 0) {
-                fclose(fp);
-                return {st.st_dev, st.st_ino};
+        char path[256] = {};
+        if (sscanf(line, "%*x-%*x %*s %*s %*s %*d %255s", path) == 1) {
+            if (is_libc_path(path)) {
+                struct stat st{};
+                if (stat(path, &st) == 0) {
+                    LOGD("Matched libc.so: %s -> dev=%lu ino=%lu", path, (unsigned long)st.st_dev, (unsigned long)st.st_ino);
+                    fclose(fp);
+                    return {st.st_dev, st.st_ino};
+                } else {
+                    LOGD("stat failed for matched libc.so path: %s", path);
+                }
             }
         }
     }
+
     fclose(fp);
+    LOGD("No matching libc.so found in /proc/self/maps");
     return {0, 0};
 }
 
