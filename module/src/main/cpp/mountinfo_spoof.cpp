@@ -82,6 +82,10 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
 static void perform_memfd_bind_mount_spoof(const char *processName) {
     LOGI("[memfd] Performing in-memory spoof for process: %s", processName);
 
+    if (geteuid() != 0) {
+        LOGW("[memfd] Warning: current process is not root (uid=%d), mount may fail", geteuid());
+    }
+
     char *data = nullptr;
     size_t datalen = 0;
 
@@ -90,9 +94,11 @@ static void perform_memfd_bind_mount_spoof(const char *processName) {
         return;
     }
 
+    LOGI("[memfd] Generated spoofed mountinfo total size: %zu bytes", datalen);
+
     int memfd = memfd_create("mountinfo_memfd", 0);
     if (memfd < 0) {
-        LOGE("[memfd] memfd_create failed: %s", strerror(errno));
+        LOGE("[memfd] memfd_create failed: errno=%d (%s)", errno, strerror(errno));
         free(data);
         return;
     }
@@ -101,8 +107,7 @@ static void perform_memfd_bind_mount_spoof(const char *processName) {
 
     ssize_t written = write(memfd, data, datalen);
     if (written != (ssize_t)datalen) {
-        LOGE("[memfd] write to memfd failed: expected=%zu, written=%zd, errno=%d (%s)",
-             datalen, written, errno, strerror(errno));
+        LOGE("[memfd] write to memfd failed: expected=%zu, written=%zd, errno=%d (%s)", datalen, written, errno, strerror(errno));
         close(memfd);
         free(data);
         return;
@@ -114,25 +119,26 @@ static void perform_memfd_bind_mount_spoof(const char *processName) {
     char memfd_path[64];
     snprintf(memfd_path, sizeof(memfd_path), "/proc/self/fd/%d", memfd);
     LOGD("[memfd] memfd path: %s", memfd_path);
+    struct stat st_memfd, st_target;
+    if (stat(memfd_path, &st_memfd) == 0) {
+        LOGD("[memfd] Source file exists, mode: %o", st_memfd.st_mode);
+    } else {
+        LOGW("[memfd] Failed to stat memfd_path: %s", strerror(errno));
+    }
+
+    if (stat("/proc/self/mountinfo", &st_target) == 0) {
+        LOGD("[memfd] Target file exists, mode: %o", st_target.st_mode);
+    } else {
+        LOGW("[memfd] Failed to stat /proc/self/mountinfo: %s", strerror(errno));
+    }
 
     LOGD("[memfd] Attempting to bind mount memfd to /proc/self/mountinfo");
+
     int res = mount(memfd_path, "/proc/self/mountinfo", nullptr, MS_BIND, nullptr);
     if (res == 0) {
         LOGI("[memfd] Successfully bind-mounted memfd -> /proc/self/mountinfo");
     } else {
-        LOGE("[memfd] Failed to bind mount memfd: errno=%d (%s)", errno, strerror(errno));
-    }
-    struct stat st_memfd, st_target;
-    if (stat(memfd_path, &st_memfd) == 0) {
-        LOGD("[memfd] Source file mode: %o", st_memfd.st_mode);
-    } else {
-        LOGD("[memfd] Failed to stat memfd_path: %s", strerror(errno));
-    }
-
-    if (stat("/proc/self/mountinfo", &st_target) == 0) {
-        LOGD("[memfd] Target file mode: %o", st_target.st_mode);
-    } else {
-        LOGD("[memfd] Failed to stat /proc/self/mountinfo: %s", strerror(errno));
+        LOGE("[memfd] Failed to bind mount memfd to /proc/self/mountinfo: errno=%d (%s)", errno, strerror(errno));
     }
 
     close(memfd);
