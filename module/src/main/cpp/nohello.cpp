@@ -36,7 +36,7 @@
 #include "MountRuleParser.cpp"
 #include "external/emoji.h"
 
-extern void install_syscall_hook(const char *process_name);
+extern void install_mountinfo_hook(const char *process_name);
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
@@ -308,7 +308,7 @@ public:
 		const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
 		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
 		{
-			install_mountinfo_hook(proc);
+			install_mountinfo_hook(process);
 		}
 		postSpecialize(process);
 		env->ReleaseStringUTFChars(args->nice_name, process);
