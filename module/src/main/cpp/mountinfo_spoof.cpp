@@ -8,16 +8,9 @@
 #include <android/log.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
-#include <unordered_map>
-#include <string>
-#include <sys/mman.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
 #include <sys/stat.h>
-#include <dirent.h>
-#include <stdint.h>
-#include <utility> 
 #include <dlfcn.h>
+#include <stdarg.h>
 
 #define LOG_TAG "NoHello"
 #include "log.h"
@@ -25,6 +18,11 @@
 
 static int spoof_mountinfo_fd = -1;
 static long (*original_syscall)(long, ...) = nullptr;
+
+void *find_syscall_in_libc();
+
+#include <unordered_map>
+#include <string>
 
 bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
     FILE *f = fopen("/proc/self/mountinfo", "r");
@@ -43,46 +41,37 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
         return false;
     }
 
-    int fake_id = 1000;
-    std::unordered_map<std::string, int> shared_map;
-    std::unordered_map<std::string, int> master_map;
+    int fake_master_id = 100;
+    std::unordered_map<std::string, int> master_id_map;
 
     while (getline(&line, &len, f) != -1) {
-        char *tokens[64];
+        char *tokens[128];
         int tok_idx = 0;
         char *saveptr = nullptr;
         char *token = strtok_r(line, " ", &saveptr);
-        while (token && tok_idx < 64) {
+        while (token && tok_idx < 128) {
             tokens[tok_idx++] = token;
             token = strtok_r(nullptr, " ", &saveptr);
         }
 
         for (int i = 6; i < tok_idx; ++i) {
-            if (strstr(tokens[i], "shared:")) {
+            if (strstr(tokens[i], "master:") == tokens[i]) {
                 std::string original = tokens[i];
-                if (!shared_map.count(original)) {
-                    shared_map[original] = fake_id++;
+                if (!master_id_map.count(original)) {
+                    master_id_map[original] = fake_master_id++;
                 }
-                snprintf(tokens[i], strlen(tokens[i]) + 1, "shared:%d", shared_map[original]);
-            }
-
-            if (strstr(tokens[i], "master:")) {
-                std::string original = tokens[i];
-                if (!master_map.count(original)) {
-                    master_map[original] = fake_id++;
-                }
-                snprintf(tokens[i], strlen(tokens[i]) + 1, "master:%d", master_map[original]);
+                snprintf(tokens[i], strlen(tokens[i]) + 1, "master:%d", master_id_map[original]);
             }
         }
 
         for (int i = 0; i < tok_idx; ++i) {
-            total += snprintf(result + total, 65536 - total, "%s%s", tokens[i], (i + 1 == tok_idx) ? "\n" : " ");
+            total += snprintf(result + total, 65536 - total, "%s%s",
+                              tokens[i], (i + 1 == tok_idx) ? "\n" : " ");
         }
     }
 
     free(line);
     fclose(f);
-
     *out_data = result;
     *out_len = total;
 
@@ -90,56 +79,10 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
     return true;
 }
 
-void *find_syscall_in_libc() {
-    FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp) {
-        LOGE("Failed to open /proc/self/maps");
-        return nullptr;
-    }
-
-    char line[512];
-    uintptr_t base_addr = 0;
-    char libc_path[256] = {};
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "r-xp") && strstr(line, "libc.so")) {
-            sscanf(line, "%lx-%*lx %*s %*s %*s %*s %255s", &base_addr, libc_path);
-            LOGI("Found libc.so mapped at: 0x%lx (%s)", base_addr, libc_path);
-            break;
-        }
-    }
-    fclose(fp);
-
-    if (!base_addr) {
-        LOGE("Failed to locate libc.so in memory");
-        return nullptr;
-    }
-
-    // 用 dlopen + dlsym 来解析 syscall 的偏移
-    void *handle = dlopen("libc.so", RTLD_NOW);
-    if (!handle) {
-        LOGE("dlopen libc.so failed");
-        return nullptr;
-    }
-
-    void *syscall_in_local = dlsym(handle, "syscall");
-    dlclose(handle);
-
-    if (!syscall_in_local) {
-        LOGE("dlsym syscall failed");
-        return nullptr;
-    }
-
-    uintptr_t offset = (uintptr_t)syscall_in_local - (uintptr_t)handle;
-    void *real_syscall = (void *)(base_addr + offset);
-    LOGI("Resolved syscall in app's libc.so at: %p", real_syscall);
-    return real_syscall;
-}
-
 long hooked_syscall(long number, ...) {
     va_list args;
     va_start(args, number);
 
-    // openat("/proc/self/mountinfo")
     if (number == SYS_openat) {
         int dirfd = va_arg(args, int);
         const char *pathname = va_arg(args, const char *);
@@ -150,11 +93,10 @@ long hooked_syscall(long number, ...) {
             LOGI("[hook] openat(\"%s\") intercepted", pathname);
             if (spoof_mountinfo_fd >= 0) {
                 int dupfd = dup(spoof_mountinfo_fd);
-                LOGI("[hook] Returning duped spoof memfd: %d", dupfd);
+                LOGI("[hook] Returning spoof memfd: %d", dupfd);
                 va_end(args);
                 return dupfd;
             } else {
-                LOGW("[hook] spoof_mountinfo_fd is invalid");
                 errno = ENOENT;
                 va_end(args);
                 return -1;
@@ -166,22 +108,18 @@ long hooked_syscall(long number, ...) {
         return ret;
     }
 
-    // read(spoofed_fd)
     if (number == SYS_read) {
         int fd = va_arg(args, int);
         void *buf = va_arg(args, void *);
         size_t count = va_arg(args, size_t);
         long res = syscall(number, fd, buf, count);
-
         if (fd == spoof_mountinfo_fd) {
-            LOGI("[hook] read(%d) on spoofed mountinfo fd, read %ld bytes", fd, res);
+            LOGI("[hook] read(%d) on spoofed fd, got %ld bytes", fd, res);
         }
-
         va_end(args);
         return res;
     }
 
-    // readlink("/proc/self/ns/mnt")
     if (number == SYS_readlink) {
         const char *path = va_arg(args, const char *);
         char *buf = va_arg(args, char *);
@@ -189,7 +127,6 @@ long hooked_syscall(long number, ...) {
 
         if (path && strcmp(path, "/proc/self/ns/mnt") == 0) {
             LOGI("[hook] readlink(\"/proc/self/ns/mnt\") intercepted");
-
             const char *fake = "mnt:[4026531999]";
             size_t len = strlen(fake);
             if (bufsiz > len) {
@@ -209,7 +146,6 @@ long hooked_syscall(long number, ...) {
         return res;
     }
 
-    // stat("/proc/self/ns/mnt")
     if (number == SYS_newfstatat) {
         int dirfd = va_arg(args, int);
         const char *path = va_arg(args, const char *);
@@ -218,13 +154,11 @@ long hooked_syscall(long number, ...) {
 
         if (path && strcmp(path, "/proc/self/ns/mnt") == 0) {
             LOGI("[hook] stat(\"/proc/self/ns/mnt\") intercepted");
-
             long res = syscall(number, dirfd, path, st, flags);
             if (res == 0 && st) {
-                LOGI("[hook] original st_ino = %lu", (unsigned long)st->st_ino);
+                LOGI("[hook] original st_ino: %lu", (unsigned long)st->st_ino);
                 st->st_ino = 4026531999;
             }
-
             va_end(args);
             return res;
         }
@@ -234,7 +168,6 @@ long hooked_syscall(long number, ...) {
         return res;
     }
 
-    // fallback for other syscalls
     if (original_syscall) {
         long a1 = va_arg(args, long);
         long a2 = va_arg(args, long);
@@ -251,6 +184,32 @@ long hooked_syscall(long number, ...) {
     return syscall(number);
 }
 
+void *find_syscall_in_libc() {
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (!fp) return nullptr;
+
+    uintptr_t base_addr = 0;
+    char line[512], libc_path[256] = {};
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "r-xp") && strstr(line, "libc.so")) {
+            sscanf(line, "%lx-%*lx %*s %*s %*s %*s %255s", &base_addr, libc_path);
+            LOGI("Found libc.so mapped at: 0x%lx (%s)", base_addr, libc_path);
+            break;
+        }
+    }
+    fclose(fp);
+    if (!base_addr) return nullptr;
+
+    void *local_syscall = dlsym(RTLD_NEXT, "syscall");
+    if (!local_syscall) return nullptr;
+
+    Dl_info info;
+    if (!dladdr(local_syscall, &info)) return nullptr;
+
+    uintptr_t offset = (uintptr_t)local_syscall - (uintptr_t)info.dli_fbase;
+    return (void *)(base_addr + offset);
+}
+
 bool install_syscall_hook() {
     void *syscall_addr = find_syscall_in_libc();
     if (!syscall_addr) return false;
@@ -262,7 +221,7 @@ bool install_syscall_hook() {
 
     uintptr_t page_start = (uintptr_t)syscall_addr & ~(getpagesize() - 1);
     if (mprotect((void *)page_start, getpagesize(), PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        LOGE("mprotect failed on syscall address");
+        LOGE("mprotect failed");
         return false;
     }
 
@@ -277,4 +236,38 @@ bool install_syscall_hook() {
 
     LOGI("syscall hook installed into target libc");
     return true;
+}
+
+void install_mountinfo_hook(const char *process_name) {
+    LOGI("[zygisk] Installing spoof hook for: %s", process_name);
+
+    if (spoof_mountinfo_fd >= 0) close(spoof_mountinfo_fd);
+
+    char *data = nullptr;
+    size_t len = 0;
+    if (!generate_spoofed_mountinfo_content(&data, &len)) {
+        LOGE("Failed to generate spoofed content");
+        return;
+    }
+
+    spoof_mountinfo_fd = syscall(SYS_memfd_create, "mountinfo", MFD_CLOEXEC);
+    if (spoof_mountinfo_fd < 0) {
+        LOGE("memfd_create failed");
+        free(data);
+        return;
+    }
+
+    fchmod(spoof_mountinfo_fd, 0444);
+    if (write(spoof_mountinfo_fd, data, len) != (ssize_t)len) {
+        LOGE("write to memfd failed");
+        close(spoof_mountinfo_fd);
+        spoof_mountinfo_fd = -1;
+        free(data);
+        return;
+    }
+
+    lseek(spoof_mountinfo_fd, 0, SEEK_SET);
+    free(data);
+
+    install_syscall_hook();
 }
