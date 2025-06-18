@@ -158,7 +158,10 @@ void install_syscall_hook(const char *processName) {
         return;
     }
 
-    memcpy(syscall_addr, &hooked_syscall, sizeof(void *));
+    void *target = (void *)&hooked_syscall;
+    memcpy(syscall_addr, &target, sizeof(void *));
+    LOGI("syscall hook installed into target libc");
+
     LOGI("syscall hook installed into target libc");
 
     if (!mountinfo_access_detected) {
