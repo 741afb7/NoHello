@@ -15,6 +15,8 @@
 #include <linux/memfd.h>
 #include <dlfcn.h>
 #include <dirent.h>
+#include <string>             
+#include <unordered_map>     
 
 #ifndef SYS_readlink
 #if defined(__aarch64__)
