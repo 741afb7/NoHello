@@ -301,6 +301,7 @@ public:
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
+	const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
 	if (strstr(process, "zygote") || strstr(process, "android.") || strstr(process, "system_server")) {
         env->ReleaseStringUTFChars(args->nice_name, process);
         return;
@@ -310,6 +311,7 @@ public:
         install_syscall_hook(process);
         hook_installed = true;
         }
+	env->ReleaseStringUTFChars(args->nice_name, process);
         preSpecialize(args);
     }
 
