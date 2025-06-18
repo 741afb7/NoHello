@@ -306,7 +306,7 @@ public:
             env->ReleaseStringUTFChars(args->nice_name, process);
             return;
         }
-	if (!(api->getFlags() & zygisk::DenylistStatus::PROCESS_DENYLISTED))
+	if (!(api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST))
 	{
 		LOGI("[zygisk] Skipping %s: not in DenyList", process);
 		env->ReleaseStringUTFChars(args->nice_name, process);
