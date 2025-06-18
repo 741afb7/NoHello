@@ -303,14 +303,16 @@ public:
     void preAppSpecialize(AppSpecializeArgs *args) override {
 	const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
 	if (strstr(process, "zygote") || strstr(process, "android.") || strstr(process, "system_server")) {
-        env->ReleaseStringUTFChars(args->nice_name, process);
-        return;
+            env->ReleaseStringUTFChars(args->nice_name, process);
+            return;
         }
-	static bool hook_installed = false;
-        if (!hook_installed) {
-        install_syscall_hook(process);
-        hook_installed = true;
+	if (!(api->getFlags() & DenylistStatus::PROCESS_DENYLISTED)) {
+            LOGI("[zygisk] Skipping %s: not in DenyList", process);
+            env->ReleaseStringUTFChars(args->nice_name, process);
+            return;
         }
+	LOGI("[zygisk] DenyList process detected: %s", process);
+	install_syscall_hook(process);
 	env->ReleaseStringUTFChars(args->nice_name, process);
         preSpecialize(args);
     }
