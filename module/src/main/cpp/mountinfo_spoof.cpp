@@ -3,6 +3,7 @@
 #include <sys/stat.h>
 #include <cstring>
 #include <android/log.h>
+#include <stdio.h>
 
 #define TAG "NoHello"
 #include "log.h"
