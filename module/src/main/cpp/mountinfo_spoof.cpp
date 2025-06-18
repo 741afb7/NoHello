@@ -90,6 +90,51 @@ bool generate_spoofed_mountinfo_content(char **out_data, size_t *out_len) {
     return true;
 }
 
+void *find_syscall_in_libc() {
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (!fp) {
+        LOGE("Failed to open /proc/self/maps");
+        return nullptr;
+    }
+
+    char line[512];
+    uintptr_t base_addr = 0;
+    char libc_path[256] = {};
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "r-xp") && strstr(line, "libc.so")) {
+            sscanf(line, "%lx-%*lx %*s %*s %*s %*s %255s", &base_addr, libc_path);
+            LOGI("Found libc.so mapped at: 0x%lx (%s)", base_addr, libc_path);
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (!base_addr) {
+        LOGE("Failed to locate libc.so in memory");
+        return nullptr;
+    }
+
+    // 用 dlopen + dlsym 来解析 syscall 的偏移
+    void *handle = dlopen("libc.so", RTLD_NOW);
+    if (!handle) {
+        LOGE("dlopen libc.so failed");
+        return nullptr;
+    }
+
+    void *syscall_in_local = dlsym(handle, "syscall");
+    dlclose(handle);
+
+    if (!syscall_in_local) {
+        LOGE("dlsym syscall failed");
+        return nullptr;
+    }
+
+    uintptr_t offset = (uintptr_t)syscall_in_local - (uintptr_t)handle;
+    void *real_syscall = (void *)(base_addr + offset);
+    LOGI("Resolved syscall in app's libc.so at: %p", real_syscall);
+    return real_syscall;
+}
+
 long hooked_syscall(long number, ...) {
     va_list args;
     va_start(args, number);
