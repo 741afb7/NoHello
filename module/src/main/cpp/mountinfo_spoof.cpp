@@ -94,6 +94,7 @@ long hooked_syscall(long number, ...) {
     va_list args;
     va_start(args, number);
 
+    // openat("/proc/self/mountinfo")
     if (number == SYS_openat) {
         int dirfd = va_arg(args, int);
         const char *pathname = va_arg(args, const char *);
@@ -102,7 +103,6 @@ long hooked_syscall(long number, ...) {
 
         if (pathname && strcmp(pathname, "/proc/self/mountinfo") == 0) {
             LOGI("[hook] openat(\"%s\") intercepted", pathname);
-
             if (spoof_mountinfo_fd >= 0) {
                 int dupfd = dup(spoof_mountinfo_fd);
                 LOGI("[hook] Returning duped spoof memfd: %d", dupfd);
@@ -116,13 +116,12 @@ long hooked_syscall(long number, ...) {
             }
         }
 
-        // fallback
         long ret = syscall(number, dirfd, pathname, flags, mode);
         va_end(args);
         return ret;
     }
 
-    // 拦截 read() 看是否读的是 spoof_mountinfo_fd
+    // read(spoofed_fd)
     if (number == SYS_read) {
         int fd = va_arg(args, int);
         void *buf = va_arg(args, void *);
@@ -137,6 +136,60 @@ long hooked_syscall(long number, ...) {
         return res;
     }
 
+    // readlink("/proc/self/ns/mnt")
+    if (number == SYS_readlink) {
+        const char *path = va_arg(args, const char *);
+        char *buf = va_arg(args, char *);
+        size_t bufsiz = va_arg(args, size_t);
+
+        if (path && strcmp(path, "/proc/self/ns/mnt") == 0) {
+            LOGI("[hook] readlink(\"/proc/self/ns/mnt\") intercepted");
+
+            const char *fake = "mnt:[4026531999]";
+            size_t len = strlen(fake);
+            if (bufsiz > len) {
+                memcpy(buf, fake, len);
+                buf[len] = '\0';
+                va_end(args);
+                return len;
+            } else {
+                errno = ENAMETOOLONG;
+                va_end(args);
+                return -1;
+            }
+        }
+
+        long res = syscall(number, path, buf, bufsiz);
+        va_end(args);
+        return res;
+    }
+
+    // stat("/proc/self/ns/mnt")
+    if (number == SYS_newfstatat) {
+        int dirfd = va_arg(args, int);
+        const char *path = va_arg(args, const char *);
+        struct stat *st = va_arg(args, struct stat *);
+        int flags = va_arg(args, int);
+
+        if (path && strcmp(path, "/proc/self/ns/mnt") == 0) {
+            LOGI("[hook] stat(\"/proc/self/ns/mnt\") intercepted");
+
+            long res = syscall(number, dirfd, path, st, flags);
+            if (res == 0 && st) {
+                LOGI("[hook] original st_ino = %lu", (unsigned long)st->st_ino);
+                st->st_ino = 4026531999;
+            }
+
+            va_end(args);
+            return res;
+        }
+
+        long res = syscall(number, dirfd, path, st, flags);
+        va_end(args);
+        return res;
+    }
+
+    // fallback for other syscalls
     if (original_syscall) {
         long a1 = va_arg(args, long);
         long a2 = va_arg(args, long);
@@ -151,48 +204,6 @@ long hooked_syscall(long number, ...) {
 
     va_end(args);
     return syscall(number);
-}
-
-void *find_syscall_in_libc() {
-    FILE *fp = fopen("/proc/self/maps", "r");
-    if (!fp) {
-        LOGE("Failed to open /proc/self/maps");
-        return nullptr;
-    }
-
-    uintptr_t base_addr = 0;
-    char line[512], libc_path[256] = {};
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "r-xp") && strstr(line, "libc.so")) {
-            sscanf(line, "%lx-%*lx %*s %*s %*s %*s %255s", &base_addr, libc_path);
-            LOGI("Found libc.so mapped at: 0x%lx (%s)", base_addr, libc_path);
-            break;
-        }
-    }
-    fclose(fp);
-    if (!base_addr) {
-        LOGE("Failed to find base address of libc");
-        return nullptr;
-    }
-
-    void *local_syscall = dlsym(RTLD_NEXT, "syscall");
-    if (!local_syscall) {
-        LOGE("dlsym syscall failed");
-        return nullptr;
-    }
-
-    Dl_info info;
-    if (!dladdr(local_syscall, &info)) {
-        LOGE("dladdr failed");
-        return nullptr;
-    }
-
-    uintptr_t local_base = (uintptr_t)info.dli_fbase;
-    uintptr_t offset = (uintptr_t)local_syscall - local_base;
-
-    void *real_syscall = (void *)(base_addr + offset);
-    LOGI("Resolved syscall in app's libc.so at: %p", real_syscall);
-    return real_syscall;
 }
 
 bool install_syscall_hook() {
