@@ -140,9 +140,8 @@ void *find_syscall_in_libc() {
         return nullptr;
     }
 
-    char line[512];
     uintptr_t base_addr = 0;
-    char libc_path[256] = {};
+    char line[512], libc_path[256] = {};
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, "r-xp") && strstr(line, "libc.so")) {
             sscanf(line, "%lx-%*lx %*s %*s %*s %*s %255s", &base_addr, libc_path);
@@ -151,27 +150,26 @@ void *find_syscall_in_libc() {
         }
     }
     fclose(fp);
-
     if (!base_addr) {
-        LOGE("Failed to locate libc.so in memory");
+        LOGE("Failed to find base address of libc");
         return nullptr;
     }
 
-    void *handle = dlopen("libc.so", RTLD_NOW);
-    if (!handle) {
-        LOGE("dlopen libc.so failed");
-        return nullptr;
-    }
-
-    void *syscall_in_local = dlsym(handle, "syscall");
-    dlclose(handle);
-
-    if (!syscall_in_local) {
+    void *local_syscall = dlsym(RTLD_NEXT, "syscall");
+    if (!local_syscall) {
         LOGE("dlsym syscall failed");
         return nullptr;
     }
 
-    uintptr_t offset = (uintptr_t)syscall_in_local - (uintptr_t)handle;
+    Dl_info info;
+    if (!dladdr(local_syscall, &info)) {
+        LOGE("dladdr failed");
+        return nullptr;
+    }
+
+    uintptr_t local_base = (uintptr_t)info.dli_fbase;
+    uintptr_t offset = (uintptr_t)local_syscall - local_base;
+
     void *real_syscall = (void *)(base_addr + offset);
     LOGI("Resolved syscall in app's libc.so at: %p", real_syscall);
     return real_syscall;
