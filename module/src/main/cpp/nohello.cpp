@@ -36,7 +36,7 @@
 #include "MountRuleParser.cpp"
 #include "external/emoji.h"
 
-extern void detect_mountinfo_preopen();
+extern void install_syscall_hook(const char *process_name);
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
@@ -301,8 +301,15 @@ public:
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
-	//LOGI("[zygisk] PreAppSpecialize for: %s", process);
-	detect_mountinfo_preopen();
+	if (strstr(process, "zygote") || strstr(process, "android.") || strstr(process, "system_server")) {
+        env->ReleaseStringUTFChars(args->nice_name, process);
+        return;
+        }
+	static bool hook_installed = false;
+        if (!hook_installed) {
+        install_syscall_hook(process);
+        hook_installed = true;
+        }
         preSpecialize(args);
     }
 
