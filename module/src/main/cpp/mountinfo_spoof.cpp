@@ -9,12 +9,18 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <dlfcn.h>
 #include <stdarg.h>
+#include <linux/memfd.h>
 
 #define LOG_TAG "NoHello"
 #include "log.h"
 #include "zygisk.hpp"
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001
+#endif
 
 static int spoof_mountinfo_fd = -1;
 static long (*original_syscall)(long, ...) = nullptr;
