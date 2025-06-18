@@ -22,6 +22,20 @@
 #define MFD_CLOEXEC 0x0001
 #endif
 
+#ifndef SYS_readlink
+#if defined(__aarch64__)
+#define SYS_readlink 89
+#elif defined(__arm__)
+#define SYS_readlink 85
+#elif defined(__x86_64__)
+#define SYS_readlink 89
+#elif defined(__i386__)
+#define SYS_readlink 85
+#else
+#error "Unsupported architecture: cannot define SYS_readlink"
+#endif
+#endif
+
 static int spoof_mountinfo_fd = -1;
 static long (*original_syscall)(long, ...) = nullptr;
 
