@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <sys/syscall.h>
 #include <dlfcn.h>
 #include <unordered_map>
 #include <string>
