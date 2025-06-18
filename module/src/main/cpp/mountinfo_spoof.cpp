@@ -101,30 +101,50 @@ long hooked_syscall(long number, ...) {
         mode_t mode = va_arg(args, int);
 
         if (pathname && strcmp(pathname, "/proc/self/mountinfo") == 0) {
-            LOGI("Intercepted openat(\"/proc/self/mountinfo\")");
+            LOGI("[hook] openat(\"%s\") intercepted", pathname);
 
             if (spoof_mountinfo_fd >= 0) {
                 int dupfd = dup(spoof_mountinfo_fd);
+                LOGI("[hook] Returning duped spoof memfd: %d", dupfd);
                 va_end(args);
                 return dupfd;
+            } else {
+                LOGW("[hook] spoof_mountinfo_fd is invalid");
+                errno = ENOENT;
+                va_end(args);
+                return -1;
             }
         }
 
+        // fallback
         long ret = syscall(number, dirfd, pathname, flags, mode);
         va_end(args);
         return ret;
     }
 
-    // 其余 syscall 正常转发
+    // 拦截 read() 看是否读的是 spoof_mountinfo_fd
+    if (number == SYS_read) {
+        int fd = va_arg(args, int);
+        void *buf = va_arg(args, void *);
+        size_t count = va_arg(args, size_t);
+        long res = syscall(number, fd, buf, count);
+
+        if (fd == spoof_mountinfo_fd) {
+            LOGI("[hook] read(%d) on spoofed mountinfo fd, read %ld bytes", fd, res);
+        }
+
+        va_end(args);
+        return res;
+    }
+
     if (original_syscall) {
-        long ret;
         long a1 = va_arg(args, long);
         long a2 = va_arg(args, long);
         long a3 = va_arg(args, long);
         long a4 = va_arg(args, long);
         long a5 = va_arg(args, long);
         long a6 = va_arg(args, long);
-        ret = original_syscall(number, a1, a2, a3, a4, a5, a6);
+        long ret = original_syscall(number, a1, a2, a3, a4, a5, a6);
         va_end(args);
         return ret;
     }
