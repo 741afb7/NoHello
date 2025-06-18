@@ -94,26 +94,19 @@ long hooked_syscall(long number, ...) {
     va_list args;
     va_start(args, number);
 
-    LOGD("hooked_syscall: syscall number = %ld", number);
-
     if (number == SYS_openat) {
         int dirfd = va_arg(args, int);
         const char *pathname = va_arg(args, const char *);
         int flags = va_arg(args, int);
         mode_t mode = va_arg(args, int);
 
-        LOGD("hooked_syscall: openat path = %s", pathname ? pathname : "null");
-
         if (pathname && strcmp(pathname, "/proc/self/mountinfo") == 0) {
             LOGI("Intercepted openat(\"/proc/self/mountinfo\")");
 
             if (spoof_mountinfo_fd >= 0) {
                 int dupfd = dup(spoof_mountinfo_fd);
-                LOGI("Returning duped memfd: %d", dupfd);
                 va_end(args);
                 return dupfd;
-            } else {
-                LOGE("spoof_mountinfo_fd not valid!");
             }
         }
 
@@ -122,57 +115,71 @@ long hooked_syscall(long number, ...) {
         return ret;
     }
 
-    if (number == SYS_read) {
-        int fd = va_arg(args, int);
-        void *buf = va_arg(args, void *);
-        size_t count = va_arg(args, size_t);
-
-        long res = syscall(number, fd, buf, count);
-
-        if (fd == spoof_mountinfo_fd) {
-            LOGD("Read called on spoofed mountinfo FD (%d), bytes = %ld", fd, res);
-            if (res > 0) {
-                char preview[129] = {0};
-                memcpy(preview, buf, (res > 128 ? 128 : res));
-                LOGD("Read content preview: %.128s", preview);
-            }
-        }
-
-        va_end(args);
-        return res;
-    }
-
-    long ret;
+    // 其余 syscall 正常转发
     if (original_syscall) {
-        long arg1 = va_arg(args, long);
-        long arg2 = va_arg(args, long);
-        long arg3 = va_arg(args, long);
-        long arg4 = va_arg(args, long);
-        long arg5 = va_arg(args, long);
-        long arg6 = va_arg(args, long);
-        ret = original_syscall(number, arg1, arg2, arg3, arg4, arg5, arg6);
-    } else {
-        ret = syscall(number);
+        long ret;
+        long a1 = va_arg(args, long);
+        long a2 = va_arg(args, long);
+        long a3 = va_arg(args, long);
+        long a4 = va_arg(args, long);
+        long a5 = va_arg(args, long);
+        long a6 = va_arg(args, long);
+        ret = original_syscall(number, a1, a2, a3, a4, a5, a6);
+        va_end(args);
+        return ret;
     }
 
     va_end(args);
-    return ret;
+    return syscall(number);
 }
 
-bool install_syscall_hook() {
+void *find_syscall_in_libc() {
+    FILE *fp = fopen("/proc/self/maps", "r");
+    if (!fp) {
+        LOGE("Failed to open /proc/self/maps");
+        return nullptr;
+    }
+
+    char line[512];
+    uintptr_t base_addr = 0;
+    char libc_path[256] = {};
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "r-xp") && strstr(line, "libc.so")) {
+            sscanf(line, "%lx-%*lx %*s %*s %*s %*s %255s", &base_addr, libc_path);
+            LOGI("Found libc.so mapped at: 0x%lx (%s)", base_addr, libc_path);
+            break;
+        }
+    }
+    fclose(fp);
+
+    if (!base_addr) {
+        LOGE("Failed to locate libc.so in memory");
+        return nullptr;
+    }
+
     void *handle = dlopen("libc.so", RTLD_NOW);
     if (!handle) {
         LOGE("dlopen libc.so failed");
-        return false;
+        return nullptr;
     }
 
-    void *syscall_addr = dlsym(handle, "syscall");
+    void *syscall_in_local = dlsym(handle, "syscall");
     dlclose(handle);
 
-    if (!syscall_addr) {
+    if (!syscall_in_local) {
         LOGE("dlsym syscall failed");
-        return false;
+        return nullptr;
     }
+
+    uintptr_t offset = (uintptr_t)syscall_in_local - (uintptr_t)handle;
+    void *real_syscall = (void *)(base_addr + offset);
+    LOGI("Resolved syscall in app's libc.so at: %p", real_syscall);
+    return real_syscall;
+}
+
+bool install_syscall_hook() {
+    void *syscall_addr = find_syscall_in_libc();
+    if (!syscall_addr) return false;
 
     void *trampoline = malloc(32);
     memcpy(trampoline, syscall_addr, 16);
@@ -181,7 +188,7 @@ bool install_syscall_hook() {
 
     uintptr_t page_start = (uintptr_t)syscall_addr & ~(getpagesize() - 1);
     if (mprotect((void *)page_start, getpagesize(), PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        LOGE("mprotect failed");
+        LOGE("mprotect failed on syscall address");
         return false;
     }
 
@@ -194,41 +201,6 @@ bool install_syscall_hook() {
     memcpy((char *)syscall_addr + sizeof(stub), &hook_func, sizeof(void *));
     __builtin___clear_cache((char *)syscall_addr, (char *)syscall_addr + 32);
 
-    LOGI("syscall hook installed");
+    LOGI("syscall hook installed into target libc");
     return true;
-}
-
-void install_mountinfo_hook(zygisk::Api *api, const char *process_name) {
-    LOGI("[zygisk] Installing mountinfo spoof hook for: %s", process_name);
-
-    if (spoof_mountinfo_fd >= 0) {
-        close(spoof_mountinfo_fd);
-        spoof_mountinfo_fd = -1;
-    }
-
-    char *data = nullptr;
-    size_t len = 0;
-    if (!generate_spoofed_mountinfo_content(&data, &len)) {
-        return;
-    }
-
-    spoof_mountinfo_fd = syscall(SYS_memfd_create, "mountinfo_memfd", MFD_CLOEXEC);
-    if (spoof_mountinfo_fd < 0) {
-        LOGE("memfd_create failed: %s", strerror(errno));
-        free(data);
-        return;
-    }
-
-    if (write(spoof_mountinfo_fd, data, len) != (ssize_t)len) {
-        LOGE("write memfd failed");
-        close(spoof_mountinfo_fd);
-        spoof_mountinfo_fd = -1;
-        free(data);
-        return;
-    }
-
-    lseek(spoof_mountinfo_fd, 0, SEEK_SET);
-    free(data);
-
-    install_syscall_hook();
 }
