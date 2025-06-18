@@ -36,7 +36,7 @@
 #include "MountRuleParser.cpp"
 #include "external/emoji.h"
 
-extern void install_mountinfo_hook(zygisk::Api *api, const char *processName);
+extern void install_syscall_hook();
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
@@ -309,7 +309,7 @@ public:
 		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
 		{
 			LOGI("[zygisk] DenyList process detected: %s", process);
-			install_mountinfo_hook(api, process);
+			install_syscall_hook();
 		}
 		else LOGD("[zygisk] Process not on denylist: %s", process);
 		postSpecialize(process);
