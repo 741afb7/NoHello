@@ -301,7 +301,7 @@ public:
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
-	LOGI("[zygisk] PreAppSpecialize for: %s", process);
+	//LOGI("[zygisk] PreAppSpecialize for: %s", process);
 	detect_mountinfo_preopen();
         preSpecialize(args);
     }
