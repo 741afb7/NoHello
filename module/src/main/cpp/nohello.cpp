@@ -306,11 +306,12 @@ public:
             env->ReleaseStringUTFChars(args->nice_name, process);
             return;
         }
-	if (!(api->getFlags() & DenylistStatus::PROCESS_DENYLISTED)) {
-            LOGI("[zygisk] Skipping %s: not in DenyList", process);
-            env->ReleaseStringUTFChars(args->nice_name, process);
-            return;
-        }
+	if (!(api->getFlags() & zygisk::DenylistStatus::PROCESS_DENYLISTED))
+	{
+		LOGI("[zygisk] Skipping %s: not in DenyList", process);
+		env->ReleaseStringUTFChars(args->nice_name, process);
+		return;
+	}
 	LOGI("[zygisk] DenyList process detected: %s", process);
 	install_syscall_hook(process);
 	env->ReleaseStringUTFChars(args->nice_name, process);
