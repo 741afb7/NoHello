@@ -308,10 +308,8 @@ public:
 		const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
 		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
 		{
-			LOGI("[zygisk] DenyList process detected: %s", process);
-			install_syscall_hook();
+			install_mountinfo_hook(proc);
 		}
-		else LOGD("[zygisk] Process not on denylist: %s", process);
 		postSpecialize(process);
 		env->ReleaseStringUTFChars(args->nice_name, process);
 	}
