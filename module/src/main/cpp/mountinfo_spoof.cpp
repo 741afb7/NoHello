@@ -73,7 +73,7 @@ bool generate_spoofed_mountinfo_content() {
 }
 
 extern "C" long hooked_syscall(long number, ...) {
-    if (number == SYS_readlink) {
+    if (number == SYS_readlinkat) {
         va_list args;
         va_start(args, number);
         const char *path = va_arg(args, const char *);
@@ -87,7 +87,7 @@ extern "C" long hooked_syscall(long number, ...) {
         }
     }
 
-    if (number == SYS_openat || number == SYS_newfstatat || number == SYS_read || number == SYS_readlink) {
+    if (number == SYS_openat || number == SYS_newfstatat || number == SYS_read || number == SYS_readlinkat) {
     }
 
     void *syscall_addr = reinterpret_cast<void *>(__builtin_return_address(0));
