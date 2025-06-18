@@ -36,7 +36,7 @@
 #include "MountRuleParser.cpp"
 #include "external/emoji.h"
 
-extern void install_syscall_hook();
+extern void install_syscall_hook(const char *process_name);
 
 using zygisk::Api;
 using zygisk::AppSpecializeArgs;
