@@ -18,6 +18,14 @@
 #define TAG "NoHello"
 #include "log.h"
 
+#ifndef SYS_readlinkat
+#define SYS_readlinkat 78
+#endif
+
+#ifndef SYS_newfstatat
+#define SYS_newfstatat 79
+#endif
+
 static bool syscall_hook_installed = false;
 static unsigned char original_syscall_code[16];
 static char *spoofed_mountinfo = nullptr;
@@ -116,7 +124,7 @@ void install_syscall_hook(const char *process_name) {
     char line[512], path[256];
     while (fgets(line, sizeof(line), maps)) {
         if (strstr(line, "libc.so")) {
-            sscanf(line, "%lx-%*lx %*s %*s %*s %*s %255s", &base_addr, path);
+            sscanf(line, "%lx-%*lx %*s %*s %*s %*s %255s", (unsigned long *)&base_addr, path);
             break;
         }
     }
@@ -126,7 +134,7 @@ void install_syscall_hook(const char *process_name) {
         LOGW("[zygisk] Failed to resolve libc.so base address");
         return;
     }
-    LOGI("[zygisk] Found libc.so mapped at: 0x%lx (%s)", base_addr, path);
+    LOGI("[zygisk] Found libc.so mapped at: 0x%lx (%s)", (unsigned long)base_addr, path);
 
     void *syscall_addr = dlsym(RTLD_DEFAULT, "syscall");
     if (!syscall_addr) {
