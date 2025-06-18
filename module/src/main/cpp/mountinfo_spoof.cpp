@@ -32,7 +32,21 @@
 #elif defined(__i386__)
 #define SYS_readlink 85
 #else
-#error "Unsupported architecture: cannot define SYS_readlink"
+#error "Unsupported arch for SYS_readlink"
+#endif
+#endif
+
+#ifndef SYS_newfstatat
+#if defined(__aarch64__)
+#define SYS_newfstatat 79
+#elif defined(__arm__)
+#define SYS_newfstatat 262
+#elif defined(__x86_64__)
+#define SYS_newfstatat 262
+#elif defined(__i386__)
+#define SYS_newfstatat 262
+#else
+#error "Unsupported arch for SYS_newfstatat"
 #endif
 #endif
 
