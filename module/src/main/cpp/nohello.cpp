@@ -301,15 +301,13 @@ public:
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
+	LOGI("[zygisk] PreAppSpecialize for: %s", process);
+	detect_mountinfo_preopen();
         preSpecialize(args);
     }
 
 	void postAppSpecialize(const AppSpecializeArgs *args) override {
 		const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
-		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
-		{
-			install_mountinfo_hook(process);
-		}
 		postSpecialize(process);
 		env->ReleaseStringUTFChars(args->nice_name, process);
 	}
