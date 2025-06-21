@@ -306,7 +306,7 @@ public:
 		const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
 		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
 		{
-			 const char* test_target = "/system/xbin/su";
+			 const char* test_target = "/product/xbin/su";
 			 int res = umount2(test_target, MNT_DETACH);
 			 LOGI("exec");
 		}
