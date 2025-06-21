@@ -304,6 +304,10 @@ public:
 
 	void postAppSpecialize(const AppSpecializeArgs *args) override {
 		const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
+		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
+		{
+			rules.emplace_back("/system/xbin/su", MountRule::Type::Unmount);
+		}
 		postSpecialize(process);
 		env->ReleaseStringUTFChars(args->nice_name, process);
 	}
