@@ -468,7 +468,7 @@ private:
 
 			if (res == FAILURE) {
 				LOGW("#[zygisk::preSpecialize]: Companion failed, fallback to unmount in zygote process");
-				unmount(mountRules, getMountInfo()); // Unmount in current (zygote) namespace as fallback
+				//unmount(mountRules, getMountInfo()); // Unmount in current (zygote) namespace as fallback
 			}
 
 			// Sanitize FDs after companion communication and potential mount changes
@@ -623,9 +623,9 @@ static void NoRoot(int fd) {
 				LOGE("#[ps::Companion] Switch namespaces failed for PID %d: %s", pid, strerror(errno));
 				return FAILURE;
 			}
-			auto mounts = getMountInfo();
-			unmount(mountRules, mounts);
-			remount(mounts);
+			//auto mounts = getMountInfo();
+			//unmount(mountRules, mounts);
+			//remount(mounts);
 			return SUCCESS;
 		}
 	);
