@@ -306,7 +306,9 @@ public:
 		const char *process = env->GetStringUTFChars(args->nice_name, nullptr);
 		if (api->getFlags() & zygisk::StateFlag::PROCESS_ON_DENYLIST)
 		{
-			rules.emplace_back("/system/xbin/su", MountRule::Type::Unmount);
+			 const char* test_target = "/system/xbin/su";
+			 int res = umount2(test_target, MNT_DETACH);
+			 LOGI("exec");
 		}
 		postSpecialize(process);
 		env->ReleaseStringUTFChars(args->nice_name, process);
